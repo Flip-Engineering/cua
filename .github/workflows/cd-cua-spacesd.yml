@@ -169,7 +169,8 @@ jobs:
     steps:
       # The lab's binfmt support runs the ARM64 container. The Actions
       # runner mounts its own x64 Node executable into that container.
-      - name: Make the Actions runtime available in the ARM64 container
+      - &arm64_actions_runtime
+        name: Make the Actions runtime available in the ARM64 container
         if: matrix.arch == 'aarch64'
         env:
           DEBIAN_FRONTEND: noninteractive
@@ -502,7 +503,9 @@ jobs:
   cua-cli-linux:
     needs: version
     name: cua-cli linux ${{ matrix.arch }}
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     timeout-minutes: 120
     container:
       image: ${{ matrix.image }}
@@ -516,12 +519,7 @@ jobs:
       run:
         shell: bash
     steps:
-      - name: Make the Actions runtime available in the ARM64 container
-        if: matrix.arch == 'aarch64'
-        run: |
-          dpkg --add-architecture amd64
-          apt-get -o Acquire::Retries=5 update
-          apt-get -o Acquire::Retries=5 install -y --no-install-recommends libc6:amd64 libstdc++6:amd64
+      - *arm64_actions_runtime
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.version.outputs.ref }}
@@ -612,16 +610,42 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: x86_64-pc-windows-msvc
+      - name: Install Go for the Windows VM gateway
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: libs/cua/netgw/go.mod
+          cache-dependency-path: libs/cua/netgw/go.sum
       - name: Build
         working-directory: libs/cua
         run: cargo build --locked --release --target "$TARGET" -p cua-spaces-cli --bin cua-spaces-cli
+      - name: Build the Windows VM gateway
+        working-directory: libs/cua
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CUA_NETGW_VERSION: ${{ needs.version.outputs.version }}
+        run: netgw/build.sh "$RUNNER_TEMP/cua-netgw"
+      - name: Check the native Windows VM interfaces
+        run: |
+          cli="libs/cua/target/$TARGET/release/cua-spaces-cli.exe"
+          "$cli" host config --help
+          "$cli" daemon --help
+          "$cli" mcp --help
+          "$RUNNER_TEMP/cua-netgw/cua-netgw.exe" -version
       - name: Package
         run: |
           set -euo pipefail
           mkdir -p dist
           name="cua-spaces-cli-$TARGET.exe"
+          gateway="cua-netgw-$TARGET.exe"
           cp "libs/cua/target/$TARGET/release/cua-spaces-cli.exe" "dist/$name"
-          (cd dist && sha256sum "$name" > "$name.sha256")
+          cp "$RUNNER_TEMP/cua-netgw/cua-netgw.exe" "dist/$gateway"
+          cp libs/cua/netgw/NOTICE dist/cua-netgw-NOTICE.txt
+          cp libs/cua/netgw/LICENSES/Apache-2.0-gvisor-tap-vsock.txt dist/cua-netgw-Apache-2.0-gvisor-tap-vsock.txt
+          cd dist
+          for file in "$name" "$gateway" cua-netgw-*.txt; do
+            sha256sum "$file" > "$file.sha256"
+          done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: cua-spacesd-cli-windows
