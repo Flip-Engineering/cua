@@ -79,7 +79,9 @@ env:
 
 jobs:
   version:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -147,8 +149,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { label: linux-x64-gnu, runner: { group: Default, os: Linux, label: Linux }, target: x86_64-unknown-linux-gnu, container: "debian:11", lib: libcua_sdk.so, exe: cua }
-          - { label: linux-arm64-gnu, runner: { group: Default, os: Linux, label: Linux }, target: aarch64-unknown-linux-gnu, container: "arm64v8/debian:11", lib: libcua_sdk.so, exe: cua }
+          - { label: linux-x64-gnu, runner: { group: baton2-native-homelab, os: Linux, label: baton2-native-linux-x64 }, target: x86_64-unknown-linux-gnu, container: "debian:11", lib: libcua_sdk.so, exe: cua }
+          - { label: linux-arm64-gnu, runner: { group: baton2-native-homelab, os: Linux, label: baton2-native-linux-x64 }, target: aarch64-unknown-linux-gnu, container: "arm64v8/debian:11", lib: libcua_sdk.so, exe: cua }
           - { label: darwin-arm64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, target: aarch64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
           - { label: darwin-x64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, target: x86_64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
           - { label: win32-x64-msvc, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, target: x86_64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe, goarch: amd64 }
@@ -456,8 +458,8 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux, arch: x86_64, runner: { group: Default, os: Linux, label: Linux }, native: linux-x64-gnu, lib: libcua_sdk.so }
-          - { platform: linux, arch: arm64, runner: { group: Default, os: Linux, label: Linux }, native: linux-arm64-gnu, lib: libcua_sdk.so }
+          - { platform: linux, arch: x86_64, runner: { group: baton2-native-homelab, os: Linux, label: baton2-native-linux-x64 }, native: linux-x64-gnu, lib: libcua_sdk.so }
+          - { platform: linux, arch: arm64, runner: { group: baton2-native-homelab, os: Linux, label: baton2-native-linux-x64 }, native: linux-arm64-gnu, lib: libcua_sdk.so }
           # One wheel per macOS arch: a universal2 wheel is over PyPI's 100 MB file limit.
           - { platform: darwin, arch: arm64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, native: darwin-arm64, lib: libcua_sdk.dylib }
           - { platform: darwin, arch: x86_64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, native: darwin-x64, lib: libcua_sdk.dylib }
@@ -567,7 +569,9 @@ jobs:
 
   npm:
     needs: [version, native]
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     steps:
       - name: Free disk space
         run: |
@@ -696,7 +700,9 @@ jobs:
   # of the Rust crates. Runs on every build, publishing or not.
   protos-and-crates:
     needs: version
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     timeout-minutes: 90
     permissions:
       contents: read
@@ -733,7 +739,9 @@ jobs:
     # CLI or the installer feed. attach-xcframework adds it to the release.
     needs: [version, wheels, npm, native, protos-and-crates]
     if: needs.version.outputs.publish == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     permissions:
       contents: write
       id-token: write
@@ -966,7 +974,9 @@ jobs:
   crates:
     needs: [version, publish]
     if: needs.version.outputs.publish == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -996,7 +1006,9 @@ jobs:
   attach-xcframework:
     needs: [version, xcframework, publish]
     if: needs.version.outputs.publish == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     timeout-minutes: 20
     permissions:
       contents: write
@@ -1038,7 +1050,9 @@ jobs:
     needs: [version, publish]
     if: >-
       !cancelled() && github.repository == 'trycua/cua' && needs.publish.result == 'success' && needs.version.outputs.publish == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     continue-on-error: true
     timeout-minutes: 90
     # The publish role trusts main and this environment (OIDC).
@@ -1067,7 +1081,9 @@ jobs:
     needs: [version, attach-xcframework]
     if: >-
       !cancelled() && github.repository == 'trycua/cua' && needs.attach-xcframework.result == 'success'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     continue-on-error: true
     timeout-minutes: 90
     # The publish role trusts main and this environment (OIDC).
