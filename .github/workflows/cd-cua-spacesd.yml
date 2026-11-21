@@ -229,9 +229,7 @@ jobs:
   macos:
     needs: version
     name: macos universal
-    runs-on:
-      group: flip-lab-os
-      labels: [self-hosted, macOS, X64, flip-macos-lab]
+    runs-on: [self-hosted, macOS, X64, flip-macos-lab]
     timeout-minutes: 120
     env:
       # Hoisted so step conditions never read `secrets` directly.
@@ -396,9 +394,7 @@ jobs:
   windows:
     needs: version
     name: windows x86_64
-    runs-on:
-      group: flip-lab-os
-      labels: [self-hosted, Windows, X64, flip-windows-lab]
+    runs-on: [self-hosted, Windows, X64, flip-windows-lab]
     timeout-minutes: 90
     # The Azure Artifact Signing vars live in this environment (as for the
     # Cua Driver release); without it they read empty and signing is skipped.
@@ -552,9 +548,7 @@ jobs:
   cua-cli-macos:
     needs: version
     name: cua-cli macos
-    runs-on:
-      group: flip-lab-os
-      labels: [self-hosted, macOS, X64, flip-macos-lab]
+    runs-on: [self-hosted, macOS, X64, flip-macos-lab]
     timeout-minutes: 120
     defaults:
       run:
@@ -594,9 +588,7 @@ jobs:
   cua-cli-windows:
     needs: version
     name: cua-cli windows x86_64
-    runs-on:
-      group: flip-lab-os
-      labels: [self-hosted, Windows, X64, flip-windows-lab]
+    runs-on: [self-hosted, Windows, X64, flip-windows-lab]
     timeout-minutes: 120
     env:
       TARGET: x86_64-pc-windows-msvc
