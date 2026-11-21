@@ -76,9 +76,7 @@ env:
 
 jobs:
   version:
-    runs-on:
-      group: baton2-native-homelab
-      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
+    runs-on: [self-hosted, Linux, X64, docker-linux]
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -127,9 +125,7 @@ jobs:
   check-version:
     needs: version
     if: needs.version.outputs.publish == 'true'
-    runs-on:
-      group: baton2-native-homelab
-      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
+    runs-on: [self-hosted, Linux, X64, docker-linux]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
