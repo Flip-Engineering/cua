@@ -32,6 +32,8 @@ const MAX_COMMANDS_PER_FRAME: usize = 128;
 const MAX_GEOMETRIES_PER_COMMAND: usize = 64;
 const MAX_PATH_POINTS: usize = 512;
 const MAX_TEXT_BYTES: usize = 200;
+/// The largest image side: four device pixels per canvas unit.
+const MAX_IMAGE_SIDE: u16 = 4 * CANVAS as u16;
 const CANVAS: u32 = 128;
 const FPS: u16 = 30;
 const DEFAULT_THEME_BYTES: &[u8] = include_bytes!("../assets/cua.default.cua-theme");
@@ -52,6 +54,15 @@ pub enum CompiledGeometry {
         center: [f32; 2],
         size: [f32; 2],
         roundness: f32,
+    },
+    /// Premultiplied RGBA8 pixels, `size` wide and high, drawn over
+    /// `origin..origin + extent` of the canvas. A command that draws an
+    /// image has that one geometry and no fill or stroke.
+    Image {
+        size: [u16; 2],
+        rgba: Vec<u8>,
+        origin: [f32; 2],
+        extent: [f32; 2],
     },
 }
 
@@ -199,6 +210,33 @@ fn validate_geometry(name: &str, frame: usize, geometry: &CompiledGeometry) -> R
                 bail!("animation `{name}` frame {frame} has invalid rectangle geometry");
             }
         }
+        CompiledGeometry::Image {
+            size,
+            rgba,
+            origin,
+            extent,
+        } => {
+            validate_pair("image origin", *origin)?;
+            validate_pair("image extent", *extent)?;
+            let [width, height] = *size;
+            if width == 0
+                || height == 0
+                || width > MAX_IMAGE_SIDE
+                || height > MAX_IMAGE_SIDE
+                || rgba.len() != usize::from(width) * usize::from(height) * 4
+                || extent[0] <= 0.0
+                || extent[1] <= 0.0
+            {
+                bail!("animation `{name}` frame {frame} has an invalid image");
+            }
+            // tiny-skia draws premultiplied pixels: no colour channel above alpha.
+            if rgba
+                .chunks_exact(4)
+                .any(|pixel| pixel[0] > pixel[3] || pixel[1] > pixel[3] || pixel[2] > pixel[3])
+            {
+                bail!("animation `{name}` frame {frame} has an image that is not premultiplied");
+            }
+        }
     }
     Ok(())
 }
@@ -234,7 +272,21 @@ fn validate_animation(name: &str, animation: &CompiledAnimation) -> Result<usize
             if !bounded_number(command.transform.rotation_degrees) {
                 bail!("animation `{name}` frame {index} has an invalid rotation");
             }
-            if command.fill.is_none() && command.stroke.is_none() {
+            let images = command
+                .geometries
+                .iter()
+                .filter(|geometry| matches!(geometry, CompiledGeometry::Image { .. }))
+                .count();
+            if images > 0
+                && (command.geometries.len() != 1
+                    || command.fill.is_some()
+                    || command.stroke.is_some())
+            {
+                bail!(
+                    "animation `{name}` frame {index} combines an image with other geometry or paint"
+                );
+            }
+            if images == 0 && command.fill.is_none() && command.stroke.is_none() {
                 bail!("animation `{name}` frame {index} has a command without paint");
             }
             if let Some(stroke) = command.stroke {
@@ -296,7 +348,7 @@ pub fn validate_compiled_theme(theme: &CompiledTheme, full: bool) -> Result<()> 
 
 #[cfg(any(test, feature = "theme-authoring"))]
 pub fn encode_theme(theme: &CompiledTheme) -> Result<Vec<u8>> {
-    validate_compiled_theme(theme, theme.profile == crate::THEME_PROFILE)?;
+    validate_compiled_theme(theme, crate::flip_hand::is_full_profile(&theme.profile))?;
     let payload = postcard::to_allocvec(theme).context("serialize compiled theme")?;
     if payload.len() > MAX_DECOMPRESSED_BYTES {
         bail!("compiled theme exceeds the decoded size limit");
@@ -350,7 +402,7 @@ pub fn decode_theme(bytes: &[u8]) -> Result<CompiledTheme> {
     if theme.source_hash != bytes[14..46] {
         bail!("cursor-theme source hash does not match its header");
     }
-    validate_compiled_theme(&theme, theme.profile == crate::THEME_PROFILE)?;
+    validate_compiled_theme(&theme, crate::flip_hand::is_full_profile(&theme.profile))?;
     Ok(theme)
 }
 
@@ -643,6 +695,8 @@ fn append_geometry(builder: &mut PathBuilder, geometry: &CompiledGeometry) {
             size,
             roundness,
         } => append_rectangle(builder, *center, *size, *roundness),
+        // `draw_image` draws an image; it adds no path.
+        CompiledGeometry::Image { .. } => {}
     }
 }
 
@@ -703,6 +757,31 @@ fn vector_paint(color: [u8; 4], opacity: f32, tint: Option<[u8; 4]>) -> Paint<'s
     }
 }
 
+/// Draw premultiplied `rgba` over `origin..origin + extent` of the canvas.
+fn draw_image(
+    target: &mut tiny_skia::Pixmap,
+    size: [u16; 2],
+    rgba: &[u8],
+    origin: [f32; 2],
+    extent: [f32; 2],
+    transform: Transform,
+    opacity: f32,
+) {
+    let (width, height) = (u32::from(size[0]), u32::from(size[1]));
+    let Some(image) = tiny_skia::PixmapRef::from_bytes(rgba, width, height) else {
+        return;
+    };
+    let placement = Transform::from_scale(extent[0] / width as f32, extent[1] / height as f32)
+        .post_translate(origin[0], origin[1])
+        .post_concat(transform);
+    let paint = tiny_skia::PixmapPaint {
+        opacity: opacity.clamp(0.0, 1.0),
+        quality: tiny_skia::FilterQuality::Bicubic,
+        ..Default::default()
+    };
+    target.draw_pixmap(0, 0, image, &paint, placement, None);
+}
+
 fn draw_frame(
     target: &mut tiny_skia::Pixmap,
     frame: &CompiledFrame,
@@ -711,6 +790,24 @@ fn draw_frame(
     tint: Option<[u8; 4]>,
 ) {
     for command in &frame.commands {
+        if let [CompiledGeometry::Image {
+            size,
+            rgba,
+            origin,
+            extent,
+        }] = command.geometries.as_slice()
+        {
+            draw_image(
+                target,
+                *size,
+                rgba,
+                *origin,
+                *extent,
+                compiled_transform(command.transform).post_concat(outer_transform),
+                command.opacity * alpha,
+            );
+            continue;
+        }
         let mut builder = PathBuilder::new();
         for geometry in &command.geometries {
             append_geometry(&mut builder, geometry);
