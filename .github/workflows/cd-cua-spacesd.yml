@@ -217,7 +217,6 @@ jobs:
     needs: version
     name: macos universal
     runs-on: [self-hosted, macOS, X64, flip-macos-lab]
-    timeout-minutes: 120
     env:
       # Hoisted so step conditions never read `secrets` directly.
       APPLICATION_CERT_BASE64: ${{ secrets.APPLICATION_CERT_BASE64 }}
@@ -382,7 +381,6 @@ jobs:
     needs: version
     name: windows x86_64
     runs-on: [self-hosted, Windows, X64, flip-windows-lab]
-    timeout-minutes: 90
     # The Azure Artifact Signing vars live in this environment (as for the
     # Cua Driver release); without it they read empty and signing is skipped.
     environment: cua-driver-release-signing
@@ -543,7 +541,6 @@ jobs:
     needs: version
     name: cua-cli macos
     runs-on: [self-hosted, macOS, X64, flip-macos-lab]
-    timeout-minutes: 120
     defaults:
       run:
         shell: bash
@@ -583,7 +580,6 @@ jobs:
     needs: version
     name: cua-cli windows x86_64
     runs-on: [self-hosted, Windows, X64, flip-windows-lab]
-    timeout-minutes: 120
     env:
       TARGET: x86_64-pc-windows-msvc
       CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
