@@ -3,8 +3,8 @@ name: "Flip: Cua Spaces CLI release"
 # Builds the Cua Spaces build of the `cua` command (cua-spaces-cli: the MIT `cua` plus the
 # Keyvault, the Cua Volume and the daemon extensions) from this fork's flip/main for the
 # computers MyFlip runs VMs on, and publishes it as the release `flip-cua-<commit>` with a
-# manifest of SHA-256 digests. flip-engineer/flip pins that manifest (priv/cua/connect/fork-cua.json)
-# and its installer and update step download only what the manifest lists.
+# manifest of SHA-256 digests plus one <target>.sha256sum file per target. flip-engineer/flip's
+# installer downloads the latest release and verifies each binary against its .sha256sum.
 #
 # Every job runs on Flip's own runners. Nothing here uses a GitHub-hosted runner.
 #
@@ -119,9 +119,15 @@ jobs:
                       "signed": False, "artifacts": artifacts}
           pathlib.Path("dist/flip-cua-manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
           PY
+          python3 - <<'PY'
+          import json, pathlib
+          m = json.loads(pathlib.Path("dist/flip-cua-manifest.json").read_text())
+          for target, row in m["artifacts"].items():
+              pathlib.Path(f"dist/{target}.sha256sum").write_text(f"{row['sha256']}  {row['file']}\n")
+          PY
           cp libs/cua/crates/cua-spaces-cli/LICENSE dist/LICENSE-FSL-1.1-MIT
           tag="flip-cua-${revision}"
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$revision" \
             --title "Flip Cua Spaces CLI $revision" \
             --notes "Cua Spaces CLI built from $revision (upstream base $upstream). Licence: FSL-1.1-MIT, text attached. Unsigned." \
-            dist/flip-cua-manifest.json dist/LICENSE-FSL-1.1-MIT $(ls dist/*-cua-spaces-cli* 2>/dev/null)
+            dist/flip-cua-manifest.json dist/LICENSE-FSL-1.1-MIT dist/*.sha256sum $(ls dist/*-cua-spaces-cli* 2>/dev/null)
