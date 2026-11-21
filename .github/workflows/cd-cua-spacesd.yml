@@ -479,8 +479,141 @@ jobs:
           path: ${{ runner.temp }}/signing/windows.txt
           if-no-files-found: error
 
+  # The Cua Spaces build of the `cua` command (cua-spaces-cli, FSL-1.1-MIT), built for the
+  # computers MyFlip runs VMs on. Its assets join the cua-spacesd release: each binary is
+  # `cua-spaces-cli-<triple>[.exe]` with a `.sha256` file, listed in SHA256SUMS and signed with
+  # a Sigstore bundle by the release job.
+  cua-cli-linux:
+    needs: version
+    name: cua-cli linux ${{ matrix.arch }}
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 120
+    container:
+      image: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, image: "debian:11", target: x86_64-unknown-linux-gnu }
+          - { arch: aarch64, image: "arm64v8/debian:11", target: aarch64-unknown-linux-gnu }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Make the Actions runtime available in the ARM64 container
+        if: matrix.arch == 'aarch64'
+        run: |
+          dpkg --add-architecture amd64
+          apt-get -o Acquire::Retries=5 update
+          apt-get -o Acquire::Retries=5 install -y --no-install-recommends libc6:amd64 libstdc++6:amd64
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install build dependencies
+        run: bash libs/cua-spacesd/packaging/release/debian-build-deps.sh
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        working-directory: libs/cua
+        run: cargo build --locked --release --target ${{ matrix.target }} -p cua-spaces-cli --bin cua-spaces-cli
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="cua-spaces-cli-${{ matrix.target }}"
+          cp libs/cua/target/${{ matrix.target }}/release/cua-spaces-cli "dist/$name"
+          (cd dist && sha256sum "$name" > "$name.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-cli-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  cua-cli-macos:
+    needs: version
+    name: cua-cli macos
+    runs-on:
+      group: flip-lab-os
+      labels: [self-hosted, macOS, X64, flip-macos-lab]
+    timeout-minutes: 120
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Build x86_64 and cross-compile arm64 using the macOS SDK
+        working-directory: libs/cua
+        run: |
+          set -euo pipefail
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --locked --release --target "$target" -p cua-spaces-cli --bin cua-spaces-cli
+          done
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            name="cua-spaces-cli-$target"
+            cp "libs/cua/target/$target/release/cua-spaces-cli" "dist/$name"
+            (cd dist && shasum -a 256 "$name" > "$name.sha256")
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-cli-macos
+          path: dist/*
+          if-no-files-found: error
+
+  cua-cli-windows:
+    needs: version
+    name: cua-cli windows x86_64
+    runs-on:
+      group: flip-lab-os
+      labels: [self-hosted, Windows, X64, flip-windows-lab]
+    timeout-minutes: 120
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Build
+        working-directory: libs/cua
+        run: cargo build --locked --release --target "$TARGET" -p cua-spaces-cli --bin cua-spaces-cli
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="cua-spaces-cli-$TARGET.exe"
+          cp "libs/cua/target/$TARGET/release/cua-spaces-cli.exe" "dist/$name"
+          (cd dist && sha256sum "$name" > "$name.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-cli-windows
+          path: dist/*
+          if-no-files-found: error
+
   release:
-    needs: [version, check-version, linux, macos, windows]
+    needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows]
     if: needs.version.outputs.publish == 'true'
     runs-on: [self-hosted, Linux, X64]
     permissions:
