@@ -8,7 +8,7 @@ use cursor_overlay::{
     encode_theme, inspect_artifact, install_artifact, list_installed_themes, uninstall_theme,
     validate_compiled_theme, CompiledAnimation, CompiledDrawCommand, CompiledFrame,
     CompiledGeometry, CompiledStroke, CompiledTheme, CompiledTransform, CursorAction,
-    CursorVisualState, ReducedMotion, THEME_PROFILE,
+    CursorVisualState, ReducedMotion, HAND_PROFILE, THEME_PROFILE,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -240,7 +240,10 @@ fn read_source_archive(path: &Path) -> Result<SourceArchive> {
         let name = path.to_string_lossy().replace('\\', "/");
         let allowed = name == "manifest.json"
             || name == "cua/theme.json"
-            || (name.starts_with("a/") && name.ends_with(".json"));
+            || (name.starts_with("a/") && name.ends_with(".json"))
+            || name
+                .strip_prefix("images/")
+                .is_some_and(|file| !file.contains('/') && file.ends_with(".png"));
         if !allowed {
             bail!("unsupported archive entry `{name}`");
         }
@@ -306,8 +309,11 @@ fn compile_source(path: &Path, full: bool) -> Result<CompiledTheme> {
     {
         bail!("Cua cursor profile v2 requires a 128×128 canvas at 30 fps");
     }
-    if full && manifest.compatibility.profile != THEME_PROFILE {
-        bail!("full validation requires profile `{THEME_PROFILE}`");
+    if full
+        && manifest.compatibility.profile != THEME_PROFILE
+        && manifest.compatibility.profile != HAND_PROFILE
+    {
+        bail!("full validation requires profile `{THEME_PROFILE}` or `{HAND_PROFILE}`");
     }
     if !manifest.variants.is_empty() {
         bail!(
@@ -346,7 +352,7 @@ fn compile_source(path: &Path, full: bool) -> Result<CompiledTheme> {
         let source = entries
             .get(&name)
             .ok_or_else(|| anyhow!("semantic manifest references missing animation `{id}`"))?;
-        compiled.insert(id.to_owned(), compile_animation(source, id)?);
+        compiled.insert(id.to_owned(), compile_animation(source, id, &entries)?);
     }
 
     let mut actions = BTreeMap::new();
@@ -706,8 +712,16 @@ enum CompiledStyle {
     },
 }
 
-fn compile_layer(layer: &Value, frame: f32, id: &str) -> Result<Vec<CompiledDrawCommand>> {
+fn compile_layer(
+    layer: &Value,
+    frame: f32,
+    id: &str,
+    images: &BTreeMap<String, ImageAsset>,
+) -> Result<Vec<CompiledDrawCommand>> {
     let label = format!("animation `{id}`");
+    if layer.get("ty").and_then(Value::as_i64) == Some(2) {
+        return compile_image_layer(layer, frame, &label, images);
+    }
     if layer.get("ty").and_then(Value::as_i64) != Some(4)
         || layer.get("ddd").and_then(Value::as_i64).unwrap_or(0) != 0
         || layer.get("parent").is_some()
@@ -832,7 +846,146 @@ fn compile_layer(layer: &Value, frame: f32, id: &str) -> Result<Vec<CompiledDraw
         .collect())
 }
 
-fn compile_animation(bytes: &[u8], id: &str) -> Result<CompiledAnimation> {
+/// One image of an animation: premultiplied RGBA8 pixels and the size the
+/// animation gives it (`w`, `h`), in canvas units.
+struct ImageAsset {
+    size: [u16; 2],
+    rgba: Vec<u8>,
+    extent: [f32; 2],
+}
+
+/// The image assets of an animation. Each names a PNG in the archive's
+/// `images/` folder, where dotLottie archives keep images (`"u": "/images/"`).
+fn image_assets(
+    animation: &Value,
+    id: &str,
+    entries: &SourceArchiveEntries,
+) -> Result<BTreeMap<String, ImageAsset>> {
+    let mut images = BTreeMap::new();
+    let Some(assets) = animation.get("assets").and_then(Value::as_array) else {
+        return Ok(images);
+    };
+    for asset in assets {
+        if asset.get("layers").is_some() {
+            bail!("animation `{id}` cannot contain nested compositions");
+        }
+        let name = asset
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("animation `{id}` has an asset without an id"))?;
+        let file = asset
+            .get("p")
+            .and_then(Value::as_str)
+            .ok_or_else(|| anyhow!("asset `{name}` of animation `{id}` names no image"))?;
+        let folder = asset.get("u").and_then(Value::as_str).unwrap_or("");
+        let embedded = asset.get("e").and_then(Value::as_i64).unwrap_or(0);
+        if embedded != 0
+            || !matches!(folder, "" | "/images/" | "images/")
+            || file.contains('/')
+            || file.contains('\\')
+            || !file.ends_with(".png")
+        {
+            bail!(
+                "asset `{name}` of animation `{id}` must be a PNG in the archive's images/ folder"
+            );
+        }
+        let bytes = entries.get(&format!("images/{file}")).ok_or_else(|| {
+            anyhow!("asset `{name}` of animation `{id}` names missing image `{file}`")
+        })?;
+        let decoded = image::load_from_memory_with_format(bytes, image::ImageFormat::Png)
+            .with_context(|| format!("decode image `{file}`"))?
+            .to_rgba8();
+        let (width, height) = decoded.dimensions();
+        let size = [
+            u16::try_from(width).context("image width")?,
+            u16::try_from(height).context("image height")?,
+        ];
+        let mut rgba = decoded.into_raw();
+        for pixel in rgba.chunks_exact_mut(4) {
+            let alpha = u16::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                *channel = ((u16::from(*channel) * alpha + 127) / 255) as u8;
+            }
+        }
+        let width = asset
+            .get("w")
+            .ok_or_else(|| anyhow!("asset `{name}` of animation `{id}` has no width"))?;
+        let height = asset
+            .get("h")
+            .ok_or_else(|| anyhow!("asset `{name}` of animation `{id}` has no height"))?;
+        let extent = [number(width, id)?, number(height, id)?];
+        if images
+            .insert(name.to_owned(), ImageAsset { size, rgba, extent })
+            .is_some()
+        {
+            bail!("animation `{id}` has duplicate asset `{name}`");
+        }
+    }
+    Ok(images)
+}
+
+/// An image layer (`ty` 2): its image over `0..w, 0..h` of the layer, moved
+/// by the layer transform.
+fn compile_image_layer(
+    layer: &Value,
+    frame: f32,
+    label: &str,
+    images: &BTreeMap<String, ImageAsset>,
+) -> Result<Vec<CompiledDrawCommand>> {
+    if layer.get("ddd").and_then(Value::as_i64).unwrap_or(0) != 0
+        || layer.get("parent").is_some()
+        || layer.get("tt").is_some()
+        || layer.get("masksProperties").is_some()
+        || layer.get("ef").is_some()
+    {
+        bail!("{label} uses an image layer outside the bounded profile");
+    }
+    let in_point = layer
+        .get("ip")
+        .map(|value| number(value, label))
+        .transpose()?
+        .unwrap_or(0.0);
+    let out_point = layer
+        .get("op")
+        .map(|value| number(value, label))
+        .transpose()?
+        .unwrap_or(0.0);
+    if frame < in_point || frame >= out_point {
+        return Ok(Vec::new());
+    }
+    let (transform, opacity) = compile_transform(
+        layer
+            .get("ks")
+            .ok_or_else(|| anyhow!("{label} layer has no transform"))?,
+        frame,
+        label,
+    )?;
+    let reference = layer
+        .get("refId")
+        .and_then(Value::as_str)
+        .ok_or_else(|| anyhow!("{label} image layer names no asset"))?;
+    let image = images
+        .get(reference)
+        .ok_or_else(|| anyhow!("{label} image layer names missing asset `{reference}`"))?;
+    Ok(vec![CompiledDrawCommand {
+        geometries: vec![CompiledGeometry::Image {
+            size: image.size,
+            rgba: image.rgba.clone(),
+            origin: [0.0, 0.0],
+            extent: image.extent,
+        }],
+        transform,
+        opacity,
+        fill: None,
+        stroke: None,
+    }])
+}
+
+fn compile_animation(
+    bytes: &[u8],
+    id: &str,
+    entries: &SourceArchiveEntries,
+) -> Result<CompiledAnimation> {
     let text =
         std::str::from_utf8(bytes).with_context(|| format!("animation `{id}` is not UTF-8"))?;
     let animation: Value =
@@ -847,13 +1000,7 @@ fn compile_animation(bytes: &[u8], id: &str) -> Result<CompiledAnimation> {
     if width != CANVAS || height != CANVAS || (frame_rate - FPS).abs() > f32::EPSILON {
         bail!("animation `{id}` must be 128×128 at 30 fps");
     }
-    if animation
-        .get("assets")
-        .and_then(Value::as_array)
-        .is_some_and(|assets| !assets.is_empty())
-    {
-        bail!("animation `{id}` cannot contain external or nested assets");
-    }
+    let images = image_assets(&animation, id, entries)?;
     let in_point = animation
         .get("ip")
         .map(|value| number(value, id))
@@ -877,7 +1024,7 @@ fn compile_animation(bytes: &[u8], id: &str) -> Result<CompiledAnimation> {
         let frame_number = in_point + index as f32;
         let mut commands = Vec::new();
         for layer in layers.iter().rev() {
-            commands.extend(compile_layer(layer, frame_number, id)?);
+            commands.extend(compile_layer(layer, frame_number, id, &images)?);
         }
         frames.push(CompiledFrame { commands });
     }
@@ -1125,7 +1272,8 @@ mod tests {
     #[test]
     fn compiles_supported_geometry_into_vector_commands() {
         let animation = vector_animation("", 0);
-        let compiled = compile_animation(animation.as_bytes(), "base").unwrap();
+        let compiled =
+            compile_animation(animation.as_bytes(), "base", &SourceArchiveEntries::new()).unwrap();
         assert_eq!(compiled.frames.len(), 1);
         assert_eq!(compiled.frames[0].commands.len(), 1);
         assert!(matches!(
@@ -1137,16 +1285,147 @@ mod tests {
     #[test]
     fn rejects_animated_geometry_and_masked_layers() {
         let animated = vector_animation("", 1);
-        assert!(compile_animation(animated.as_bytes(), "base")
-            .unwrap_err()
-            .to_string()
-            .contains("geometry animation is not supported"));
+        assert!(
+            compile_animation(animated.as_bytes(), "base", &SourceArchiveEntries::new())
+                .unwrap_err()
+                .to_string()
+                .contains("geometry animation is not supported")
+        );
 
         let masked = vector_animation(r#","masksProperties":[] "#, 0);
-        assert!(compile_animation(masked.as_bytes(), "base")
-            .unwrap_err()
-            .to_string()
-            .contains("outside the bounded vector profile"));
+        assert!(
+            compile_animation(masked.as_bytes(), "base", &SourceArchiveEntries::new())
+                .unwrap_err()
+                .to_string()
+                .contains("outside the bounded vector profile")
+        );
+    }
+
+    fn png(width: u32, height: u32, rgba: [u8; 4]) -> Vec<u8> {
+        let image = image::RgbaImage::from_pixel(width, height, image::Rgba(rgba));
+        let mut bytes = Vec::new();
+        image
+            .write_to(&mut Cursor::new(&mut bytes), image::ImageFormat::Png)
+            .unwrap();
+        bytes
+    }
+
+    fn image_animation(asset: &str) -> String {
+        format!(
+            r#"{{
+                "v":"5.12.2",
+                "fr":30,
+                "ip":0,
+                "op":2,
+                "w":128,
+                "h":128,
+                "nm":"hand",
+                "ddd":0,
+                "assets":[{asset}],
+                "layers":[{{
+                    "ty":2,
+                    "ddd":0,
+                    "ip":0,
+                    "op":2,
+                    "refId":"hand",
+                    "ks":{{
+                        "a":{{"a":0,"k":[0,0]}},
+                        "p":{{"a":0,"k":[16,8]}},
+                        "s":{{"a":0,"k":[100,100]}},
+                        "r":{{"a":0,"k":0}},
+                        "o":{{"a":0,"k":100}}
+                    }}
+                }}]
+            }}"#
+        )
+    }
+
+    #[test]
+    fn compiles_image_layers_into_premultiplied_images() {
+        let entries = SourceArchiveEntries::from([(
+            "images/hand.png".to_owned(),
+            png(4, 2, [200, 100, 50, 128]),
+        )]);
+        let animation =
+            image_animation(r#"{"id":"hand","w":96,"h":48,"u":"/images/","p":"hand.png","e":0}"#);
+        let compiled = compile_animation(animation.as_bytes(), "hand", &entries).unwrap();
+        assert_eq!(compiled.frames.len(), 2);
+        let command = &compiled.frames[0].commands[0];
+        assert_eq!(command.transform.position, [16.0, 8.0]);
+        assert_eq!((command.fill, command.stroke), (None, None));
+        let CompiledGeometry::Image {
+            size,
+            rgba,
+            origin,
+            extent,
+        } = &command.geometries[0]
+        else {
+            panic!("expected an image");
+        };
+        assert_eq!(*size, [4, 2]);
+        assert_eq!(*origin, [0.0, 0.0]);
+        assert_eq!(*extent, [96.0, 48.0]);
+        assert_eq!(&rgba[..4], &[100, 50, 25, 128]);
+    }
+
+    #[test]
+    fn rejects_images_outside_the_archive_images_folder() {
+        let entries =
+            SourceArchiveEntries::from([("images/hand.png".to_owned(), png(2, 2, [0, 0, 0, 255]))]);
+        for asset in [
+            r#"{"id":"hand","w":8,"h":8,"u":"/images/","p":"other.png","e":0}"#,
+            r#"{"id":"hand","w":8,"h":8,"u":"/images/","p":"../hand.png","e":0}"#,
+            r#"{"id":"hand","w":8,"h":8,"u":"","p":"data:image/png;base64,AAAA","e":1}"#,
+            r#"{"id":"hand","w":8,"h":8,"u":"https://example.com/","p":"hand.png","e":0}"#,
+        ] {
+            let animation = image_animation(asset);
+            assert!(compile_animation(animation.as_bytes(), "hand", &entries).is_err());
+        }
+    }
+
+    #[test]
+    fn compiles_a_full_hand_theme_from_an_archive() {
+        let animation =
+            image_animation(r#"{"id":"hand","w":64,"h":64,"u":"/images/","p":"hand.png","e":0}"#);
+        let actions = CursorAction::ALL
+            .iter()
+            .map(|action| {
+                format!(
+                    r#""{}":{{"animation":"hand","still_frame":0}}"#,
+                    action.as_str()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let semantic = format!(
+            r#"{{
+                "schema":"cua.cursor-theme/2",
+                "id":"flip.myflip.test.v1.r2",
+                "name":"MyFlip",
+                "version":"1.0.0",
+                "author":"Flip",
+                "license":"proprietary",
+                "compatibility":{{"profile":"{HAND_PROFILE}","semantics":2}},
+                "canvas":{{"width":128,"height":128,"fps":30}},
+                "hotspot":{{"x":64,"y":64}},
+                "actions":{{{actions}}}
+            }}"#
+        );
+        let image = png(8, 8, [0, 0, 0, 255]);
+        let source = archive_with_entries(&[
+            (
+                "manifest.json",
+                &br#"{"version":"2","animations":[{"id":"hand"}]}"#[..],
+            ),
+            ("cua/theme.json", semantic.as_bytes()),
+            ("a/hand.json", animation.as_bytes()),
+            ("images/hand.png", image.as_slice()),
+        ]);
+        let theme = compile_source(source.path(), true).unwrap();
+        assert_eq!(theme.profile, HAND_PROFILE);
+        assert_eq!(theme.actions.len(), CursorAction::ALL.len());
+        let bytes = encode_theme(&theme).unwrap();
+        assert_eq!(cursor_overlay::decode_theme(&bytes).unwrap(), theme);
     }
 
     #[test]
@@ -1189,7 +1468,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_and_oversized_entries() {
-        let unsupported = archive_with_entries(&[("images/pointer.png", b"not-an-image")]);
+        let unsupported = archive_with_entries(&[("images/nested/pointer.png", b"not-an-image")]);
         assert!(read_source_archive(unsupported.path())
             .unwrap_err()
             .to_string()

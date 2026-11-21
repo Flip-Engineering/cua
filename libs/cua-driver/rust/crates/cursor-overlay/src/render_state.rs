@@ -484,12 +484,18 @@ impl RenderStateCore {
     /// arrival and while a click, press, scroll or typing cue holds the
     /// float.
     pub fn painted_rotation(&self) -> f64 {
+        if crate::flip_hand::has_hand_theme(self) {
+            return 0.0;
+        }
         self.heading_rotation_at(self.motion_t) + self.float_offset().tilt
     }
 
     /// The `cursor.rotate` part of [`Self::painted_rotation`] with the move
     /// `motion_t` seconds in: only while travelling, upright at arrival.
     pub(crate) fn heading_rotation_at(&self, motion_t: f64) -> f64 {
+        if crate::flip_hand::has_hand_theme(self) {
+            return 0.0;
+        }
         let mode = self.options().rotate;
         match self.trajectory.as_ref() {
             Some(traj) if !self.reduced_motion() => {
@@ -509,6 +515,9 @@ impl RenderStateCore {
     /// cursor draws no action marks, whatever the agent does, so it stays the
     /// plain arrow for clicks, typing, keys, scrolling and every other action.
     pub fn painted_action(&self) -> CursorAction {
+        if let Some((action, _)) = crate::flip_hand::pose(self) {
+            return action;
+        }
         CursorAction::Idle
     }
 
@@ -1456,7 +1465,7 @@ pub fn paint_cursor_with_badge(
     let to_px = |x: f64, y: f64| (((x - origin_x) * s) as f32, ((y - origin_y) * s) as f32);
     // The halo (`cursor.halo`) sits behind the arrow body and moves, floats
     // and turns with it. Translucent, so not on surfaces that cannot blend.
-    if options.halo && core.effects_capable {
+    if options.halo && core.effects_capable && !crate::flip_hand::has_hand_theme(core) {
         let (bx, by) = crate::cursor_pose::BODY_OFFSET_PT;
         let (sin, cos) = rotation.sin_cos();
         let cx = tip_x + (bx * cos - by * sin + float.dx) * s;
@@ -1472,11 +1481,20 @@ pub fn paint_cursor_with_badge(
     }
     paint_effects_under(pm, &effects, effect_rgb, f64::from(alpha_scale), &to_px, sf);
     // Click squish scales the artwork about its hotspot.
-    let art_scale = backing_scale.max(1.0) * (1.0 - effects.squish as f32);
+    // A hand theme taps instead (`crate::flip_hand`).
+    let squish = if crate::flip_hand::has_hand_theme(core) {
+        0.0
+    } else {
+        effects.squish as f32
+    };
+    let art_scale = backing_scale.max(1.0) * (1.0 - squish);
 
     // Every theme paints its idle frame: the cursor draws no action marks.
+    let hand_visual = crate::flip_hand::visual(core);
     let idle_visual;
-    let visual = if core.painted_action() == core.visual.resolved_action {
+    let visual = if let Some(hand) = hand_visual.as_ref() {
+        hand
+    } else if core.painted_action() == core.visual.resolved_action {
         &core.visual
     } else {
         idle_visual = CursorVisualState {
