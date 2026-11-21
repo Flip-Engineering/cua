@@ -49,6 +49,8 @@ if [[ "$target" == aarch64-unknown-linux-gnu ]]; then
     echo 'PKG_CONFIG_ALLOW_CROSS_aarch64_unknown_linux_gnu=1'
     echo 'PKG_CONFIG_LIBDIR_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu/pkgconfig:/usr/share/pkgconfig'
     echo 'CFLAGS_aarch64_unknown_linux_gnu=-idirafter /usr/include/aarch64-linux-gnu -idirafter /usr/include'
+    # audiopus_sys builds an archive from its vendored source when pkg-config has no Opus.
+    echo 'LIBOPUS_STATIC=1'
     echo 'QEMU_LD_PREFIX=/usr/aarch64-linux-gnu'
     echo 'OBJDUMP=aarch64-linux-gnu-objdump'
   } >> "${GITHUB_ENV:?}"
