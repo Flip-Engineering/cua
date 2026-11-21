@@ -705,28 +705,34 @@ jobs:
       # Keyless Sigstore signing of the release assets.
       id-token: write
     steps:
+      - name: Create a fresh release directory
+        id: paths
+        run: |
+          staging="$(mktemp -d "$RUNNER_TEMP/cua-release.XXXXXX")"
+          echo "staging=$staging" >> "$GITHUB_OUTPUT"
       - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: cua-spacesd-*
-          path: release
+          path: ${{ steps.paths.outputs.staging }}/release
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: signing-*
-          path: signing
+          path: ${{ steps.paths.outputs.staging }}/signing
           merge-multiple: true
       - name: Verify checksums and write SHA256SUMS
-        working-directory: release
+        working-directory: ${{ steps.paths.outputs.staging }}/release
         run: |
           set -euo pipefail
           for sum in *.sha256; do sha256sum -c "$sum"; done
-          find . -maxdepth 1 -type f ! -name '*.sha256' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
-          cat SHA256SUMS
+          find . -maxdepth 1 -type f ! -name '*.sha256' ! -name SHA256SUMS -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          sha256sum -c SHA256SUMS
           for f in SHA256SUMS $(awk '{print $2}' SHA256SUMS); do
             cosign sign-blob --yes --bundle "$f.sigstore.json" "$f" >/dev/null
           done
       - name: Upload to the GitHub release
+        working-directory: ${{ steps.paths.outputs.staging }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
