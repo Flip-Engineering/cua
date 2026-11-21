@@ -103,9 +103,15 @@ def labels_for(workflow: dict, job: dict) -> list[str]:
         return []
     labels: list[str] = []
     if isinstance(runs_on, dict):
-        if "group" in runs_on:
+        group_labels = runs_on.get("labels", [])
+        # A literal, required self-hosted label restricts even a named group
+        # to self-hosted machines. Keep checking all other group targets.
+        self_hosted = group_labels == "self-hosted" or (
+            isinstance(group_labels, list) and "self-hosted" in group_labels
+        )
+        if "group" in runs_on and not self_hosted:
             labels.append(f"group:{runs_on['group']}")
-        runs_on = runs_on.get("labels", [])
+        runs_on = group_labels
     texts = _strings(runs_on)
     matrix = (job.get("strategy") or {}).get("matrix")
     # `on` parses as boolean True in YAML 1.1.

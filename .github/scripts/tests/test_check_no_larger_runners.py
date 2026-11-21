@@ -37,6 +37,7 @@ class LargerRunnerCheck(unittest.TestCase):
               two: {runs-on: [self-hosted, cua-linux-16core], steps: []}
               three: {runs-on: ubuntu-latest, steps: []}
               four: {runs-on: {group: big-runners}, steps: []}
+              five: {runs-on: {group: lab, labels: [self-hosted, Windows, X64]}, steps: []}
         """})
         got = {(j, l) for _, j, l in chk.find_uses(root)}
         self.assertEqual(got, {("one", "macos-26-xlarge"), ("two", "cua-linux-16core"),
