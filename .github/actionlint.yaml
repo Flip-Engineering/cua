@@ -4,6 +4,7 @@
 self-hosted-runner:
   labels:
     - baton2-native-linux-x64
+    - docker-linux
     - flip-macos-lab
     - flip-windows-lab
     - lume

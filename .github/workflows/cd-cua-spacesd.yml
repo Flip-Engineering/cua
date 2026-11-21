@@ -36,7 +36,8 @@ name: "CD: cua-spacesd"
 #
 # A manual dispatch is a dry run by default (artifacts only). With
 # dry_run=false it rebuilds an existing `cua-spacesd-v<version>` tag and
-# uploads to its release (recovery for a failed tag run).
+# uploads to its release (recovery for a failed tag run). Flip packaging tags
+# append -flip.N to the unchanged upstream daemon version.
 
 on:
   push:
@@ -140,16 +141,18 @@ jobs:
           set -euo pipefail
           FILE_VERSION="$(tr -d '[:space:]' < libs/cua-spacesd/VERSION)"
           CARGO_VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' libs/cua-spacesd/Cargo.toml)"
-          echo "tag=$VERSION VERSION=$FILE_VERSION Cargo.toml=$CARGO_VERSION"
-          test "$FILE_VERSION" = "$VERSION"
-          test "$CARGO_VERSION" = "$VERSION"
+          SOURCE_VERSION="$VERSION"
+          if [[ "$GITHUB_REPOSITORY" == Flip-Engineering/cua && "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-flip\.[1-9][0-9]*$ ]]; then
+            SOURCE_VERSION="${BASH_REMATCH[1]}"
+          fi
+          echo "tag=$VERSION source=$SOURCE_VERSION VERSION=$FILE_VERSION Cargo.toml=$CARGO_VERSION"
+          test "$FILE_VERSION" = "$SOURCE_VERSION"
+          test "$CARGO_VERSION" = "$SOURCE_VERSION"
 
   linux:
     needs: version
     name: linux ${{ matrix.arch }}
-    runs-on:
-      group: baton2-native-homelab
-      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
+    runs-on: [self-hosted, Linux, X64, docker-linux]
     timeout-minutes: 90
     container:
       image: ${{ matrix.image }}
@@ -503,9 +506,7 @@ jobs:
   cua-cli-linux:
     needs: version
     name: cua-cli linux ${{ matrix.arch }}
-    runs-on:
-      group: baton2-native-homelab
-      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
+    runs-on: [self-hosted, Linux, X64, docker-linux]
     timeout-minutes: 120
     container:
       image: ${{ matrix.image }}
@@ -640,10 +641,11 @@ jobs:
           gateway="cua-netgw-$TARGET.exe"
           cp "libs/cua/target/$TARGET/release/cua-spaces-cli.exe" "dist/$name"
           cp "$RUNNER_TEMP/cua-netgw/cua-netgw.exe" "dist/$gateway"
+          cp libs/cua/crates/cua-spaces-cli/LICENSE dist/LICENSE-FSL-1.1-MIT
           cp libs/cua/netgw/NOTICE dist/cua-netgw-NOTICE.txt
           cp libs/cua/netgw/LICENSES/Apache-2.0-gvisor-tap-vsock.txt dist/cua-netgw-Apache-2.0-gvisor-tap-vsock.txt
           cd dist
-          for file in "$name" "$gateway" cua-netgw-*.txt; do
+          for file in "$name" "$gateway" LICENSE-FSL-1.1-MIT cua-netgw-*.txt; do
             sha256sum "$file" > "$file.sha256"
           done
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -652,8 +654,52 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Cua's cursor-theme compiler for Flip's server (flip-engineer/flip#2846): the cua-sdk
+  # sidecar compiles each owner's hand theme with it. One extra asset of the release,
+  # `cua-cursor-theme-x86_64-unknown-linux-gnu` with a `.sha256` file, listed in SHA256SUMS
+  # and signed like the others; it is not one of the spacesd targets.
+  cursor-theme-linux:
+    needs: version
+    name: cua-cursor-theme linux x86_64
+    runs-on: [self-hosted, Linux, X64, docker-linux]
+    timeout-minutes: 90
+    container:
+      image: "debian:11"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install build dependencies
+        run: bash libs/cua-spacesd/packaging/release/debian-build-deps.sh
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+      - name: Build
+        working-directory: libs/cua-driver/rust
+        run: cargo build --locked --release --target x86_64-unknown-linux-gnu -p cursor-theme-cli --bin cua-cursor-theme
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name=cua-cursor-theme-x86_64-unknown-linux-gnu
+          cp libs/cua-driver/rust/target/x86_64-unknown-linux-gnu/release/cua-cursor-theme "dist/$name"
+          strip "dist/$name"
+          "dist/$name" list
+          (cd dist && sha256sum "$name" > "$name.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-cursor-theme-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+
   release:
-    needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows]
+    needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows, cursor-theme-linux]
     if: needs.version.outputs.publish == 'true'
     runs-on:
       group: baton2-native-homelab
@@ -718,6 +764,8 @@ jobs:
             [ -n "$unsigned" ] && label="$label, UNSIGNED: $unsigned"
             {
               echo "**$GITHUB_REPOSITORY prerelease ($label).** Built by cd-cua-spacesd.yml at $GITHUB_REF ($GITHUB_SHA)."
+              echo
+              echo "Cua Spaces CLI is built from Cua AI, Inc. source under the attached FSL-1.1-MIT license."
               echo
               echo "Signing:"
               echo "- linux: no OS code signing (Sigstore bundle only)"
