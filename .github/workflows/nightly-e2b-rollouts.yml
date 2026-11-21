@@ -39,6 +39,7 @@ env:
 
 jobs:
   checker:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: checker unit tests
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -52,7 +53,9 @@ jobs:
 
   guard:
     name: guard (gVisor, arm64)
-    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:e2b-rollouts')
+    if: >-
+      ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:e2b-rollouts'))
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 90
     steps:

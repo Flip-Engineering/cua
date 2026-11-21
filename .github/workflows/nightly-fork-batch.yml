@@ -47,6 +47,7 @@ env:
 
 jobs:
   guard-logic:
+    if: ${{ github.repository == 'trycua/cua' }}
     # The guard's own logic, on every change to it (no VM).
     runs-on: ubuntu-24.04
     steps:
@@ -55,7 +56,7 @@ jobs:
         run: python3 -m unittest discover -s libs/cua/bench/fork-batch -p 'test_*.py' -v
 
   bench:
-    if: github.event_name != 'pull_request'
+    if: ${{ (github.event_name != 'pull_request') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 240
     steps:

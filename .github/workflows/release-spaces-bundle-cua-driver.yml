@@ -41,7 +41,9 @@ concurrency:
 jobs:
   bundle:
     # Not a driver tag: nothing to do.
-    if: github.event_name != 'release' || startsWith(github.event.release.tag_name, 'cua-driver-rs-v')
+    if: >-
+      ${{ (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'cua-driver-rs-v'))
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

@@ -30,8 +30,12 @@ concurrency:
 jobs:
   collect:
     name: cla-collect
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
+    if: >-
+      ${{ (github.event_name == 'pull_request')
+      && (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     timeout-minutes: 5
     permissions: {}
     steps:
@@ -50,17 +54,19 @@ jobs:
 
   cla:
     name: cla
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     permissions:
       actions: write
       contents: write
       pull-requests: write
       statuses: write
     if: >-
-      github.event_name == 'issue_comment' &&
-      github.event.issue.pull_request &&
-      (github.event.comment.body == 'recheck' ||
-      github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA')
+      ${{ (github.event_name == 'issue_comment'
+      && github.event.issue.pull_request
+      && (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA'))
+      && (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
     steps:
       # The action stores signatures on the `cla-signatures` branch but cannot
       # create that branch. Without it every run fails with "Branch

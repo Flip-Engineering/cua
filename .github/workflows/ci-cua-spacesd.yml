@@ -93,12 +93,20 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   changes:
     needs: quick
-    if: ${{ !failure() && !cancelled() && ((github.event_name != 'pull_request' || !github.event.pull_request.draft) && (!startsWith(github.head_ref, 'release-please--branches--'))) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (!startsWith(github.head_ref, 'release-please--branches--')))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: "cua-spacesd / changes"
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -190,7 +198,15 @@ jobs:
   test:
     name: fmt, clippy, test (${{ matrix.os }})
     needs: [quick, changes]
-    if: ${{ !failure() && !cancelled() && needs.changes.result == 'success' && ((github.event_name != 'pull_request' || !github.event.pull_request.draft) && (needs.changes.outputs.run == 'true' && needs.changes.outputs.legs_test != '[]')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.changes.result == 'success'
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (needs.changes.outputs.run == 'true'
+      && needs.changes.outputs.legs_test != '[]'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     strategy:
       fail-fast: false
       matrix:
@@ -317,7 +333,13 @@ jobs:
     # Not shipped yet (renames fail in the Windows NFS client): run on
     # demand while the Windows mount is finished.
     needs: quick
-    if: ${{ !failure() && !cancelled() && ((github.event_name != 'pull_request' || !github.event.pull_request.draft) && (github.event_name == 'workflow_dispatch')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (github.event_name == 'workflow_dispatch'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: windows-latest
     timeout-minutes: 60
     defaults:
@@ -379,7 +401,18 @@ jobs:
   relay-e2e:
     name: relay e2e (docker) (${{ matrix.shard }})
     needs: [quick, changes]
-    if: ${{ !failure() && !cancelled() && needs.changes.result == 'success' && ((github.event_name != 'pull_request' || !github.event.pull_request.draft) && (needs.changes.outputs.run == 'true' && needs.changes.outputs.relay_run == 'true' && contains(needs.changes.outputs.matrix, 'ubuntu') && needs.changes.outputs.legs_relay != '[]' && !contains(fromJSON(needs.changes.outputs.reused), 'relay e2e (docker)'))) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.changes.result == 'success'
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (needs.changes.outputs.run == 'true'
+      && needs.changes.outputs.relay_run == 'true'
+      && contains(needs.changes.outputs.matrix, 'ubuntu')
+      && needs.changes.outputs.legs_relay != '[]'
+      && !contains(fromJSON(needs.changes.outputs.reused), 'relay e2e (docker)')))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     strategy:
       fail-fast: false
       matrix:
@@ -419,7 +452,11 @@ jobs:
   # require if branch protection ever needs one.
   result:
     name: "cua-spacesd / result"
-    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (always()) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (always())
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     needs: [quick, changes, test, relay-e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5

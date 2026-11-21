@@ -45,6 +45,7 @@ env:
 
 jobs:
   linux-kvm:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: linux-kvm (${{ matrix.disk }} disk)
     runs-on: ubuntu-24.04
     timeout-minutes: 90

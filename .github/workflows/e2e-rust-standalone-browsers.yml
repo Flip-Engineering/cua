@@ -38,6 +38,7 @@ concurrency:
 
 jobs:
   source:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: "Resolve exact source"
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -59,6 +60,7 @@ jobs:
           echo "sha=${sha,,}" >> "$GITHUB_OUTPUT"
 
   browser:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: "${{ matrix.label }} / ${{ matrix.products }}"
     needs: source
     strategy:

@@ -3,6 +3,8 @@
 import json
 import os
 from pathlib import Path
+
+from tests.workflow_conditions import job_condition
 import re
 import subprocess
 import tempfile
@@ -994,7 +996,7 @@ fi
         for job, (called, sha_input) in gates.items():
             block = workflow.split(f"\n  {job}:\n", 1)[1].split("\n\n", 1)[0]
             self.assertIn("    needs: release-attribution-preflight\n", block)
-            self.assertIn(f"    if: {tag_push} || inputs.channel == 'nightly'\n", block)
+            self.assertEqual(job_condition(workflow, job), f"{tag_push} || inputs.channel == 'nightly'")
             self.assertIn(f"    uses: ./.github/workflows/{called}\n", block)
             self.assertIn(sha_input, block)
             self.assertIn("      actions: read\n", block)
@@ -1019,7 +1021,7 @@ fi
             *gates,
         ):
             self.assertIn(f"      - {job}\n", needs)
-        self.assertIn(f"    if: {tag_push}\n", needs)
+        self.assertEqual(job_condition(workflow, "release"), tag_push)
         self.assertNotIn("always()", needs)
         self.assertIn("ref: ${{ env.RELEASE_REF }}", steps)
         self.assertIn('if [[ "$SHA" != "$CERTIFIED_SHA" ]]; then', steps)
@@ -1199,10 +1201,7 @@ fi
             "validate:\n    needs: installer-compatibility",
             release_metadata,
         )
-        self.assertIn(
-            "needs: installer-compatibility\n    if: always()",
-            release_metadata,
-        )
+        self.assertTrue(job_condition(release_metadata, "validate").startswith("always()"))
         self.assertIn(
             'if [[ "$INSTALLER_CERTIFICATION_RESULT" != "success" ]]',
             release_metadata,

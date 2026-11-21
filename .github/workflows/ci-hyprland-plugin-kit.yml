@@ -41,7 +41,7 @@ env:
 
 jobs:
   kit:
-    if: ${{ !startsWith(github.head_ref, 'release-please--branches--') }}
+    if: ${{ (!startsWith(github.head_ref, 'release-please--branches--')) && github.repository == 'trycua/cua' }}
     name: ${{ matrix.channel }} (${{ matrix.profile }})
     runs-on: ubuntu-24.04
     timeout-minutes: 60

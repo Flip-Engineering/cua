@@ -57,9 +57,12 @@ jobs:
     name: scope
     # Only when called by another workflow: on its own, CI: Quick is always needed.
     if: >-
-      (github.event_name == 'pull_request' || github.event_name == 'merge_group')
-      && !contains(github.workflow_ref, '/.github/workflows/ci-quick.yml@')
-    runs-on: ubuntu-latest
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group')
+      && !contains(github.workflow_ref, '/.github/workflows/ci-quick.yml@'))
+      && (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       skip: ${{ steps.decide.outputs.skip }}
@@ -129,8 +132,16 @@ jobs:
 
   quick:
     name: quick
-    if: github.event_name == 'pull_request' || (github.event_name == 'merge_group' && vars.CI_QUEUE_RUNS == 'true')
-    runs-on: ubuntu-latest
+    if: >-
+      ${{ (github.event_name == 'pull_request' || (github.event_name == 'merge_group'
+      && vars.CI_QUEUE_RUNS == 'true'))
+      && (github.repository == 'trycua/cua' || (github.repository == 'Flip-Engineering/cua'
+      && ((github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository)
+      || github.event_name == 'merge_group'))) }}
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - name: Skip when this commit already passed

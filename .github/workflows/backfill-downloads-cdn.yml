@@ -81,7 +81,7 @@ jobs:
 
   dry-run:
     name: List what would be copied
-    if: inputs.dry_run
+    if: ${{ (inputs.dry_run) && github.repository == 'trycua/cua' }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -103,7 +103,7 @@ jobs:
 
   copy:
     name: Copy to the CDN
-    if: "!inputs.dry_run"
+    if: ${{ (!inputs.dry_run) && github.repository == 'trycua/cua' }}
     needs: plan
     runs-on: ubuntu-latest
     timeout-minutes: 240

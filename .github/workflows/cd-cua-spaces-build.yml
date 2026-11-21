@@ -126,7 +126,7 @@ jobs:
   plan:
     name: Plan
     # The signing environment is restricted to main; so is this workflow.
-    if: github.ref == 'refs/heads/main'
+    if: ${{ (github.ref == 'refs/heads/main') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
@@ -214,7 +214,7 @@ jobs:
   spacesd-published:
     name: cua-spacesd pin is published
     needs: plan
-    if: needs.plan.outputs.skip != 'true'
+    if: ${{ (needs.plan.outputs.skip != 'true') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
@@ -238,7 +238,7 @@ jobs:
   slice:
     name: Producer, SwiftUI Rust
     needs: [plan, spacesd-published]
-    if: needs.plan.outputs.skip != 'true'
+    if: ${{ (needs.plan.outputs.skip != 'true') && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-cua-spaces-rust-slice.yml
     permissions:
       contents: read
@@ -248,7 +248,10 @@ jobs:
   natives-mac:
     name: Producer, Electron macOS natives
     needs: [plan, spacesd-published]
-    if: needs.plan.outputs.skip != 'true' && inputs.channel != 'nightly'
+    if: >-
+      ${{ (needs.plan.outputs.skip != 'true'
+      && inputs.channel != 'nightly')
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/cd-cua-spaces-natives-main.yml
     permissions:
       contents: read
@@ -260,7 +263,7 @@ jobs:
   macos-rust:
     name: SwiftUI Rust (${{ matrix.arch }})
     needs: [plan, spacesd-published, slice]
-    if: needs.plan.outputs.shadow == 'true'
+    if: ${{ (needs.plan.outputs.shadow == 'true') && github.repository == 'trycua/cua' }}
     runs-on: macos-26
     timeout-minutes: 180
     strategy:
@@ -330,7 +333,7 @@ jobs:
   web:
     name: Web UI
     needs: plan
-    if: needs.plan.outputs.shadow == 'true'
+    if: ${{ (needs.plan.outputs.shadow == 'true') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 60
     permissions:
@@ -375,6 +378,7 @@ jobs:
   # macOS: sign, notarize, staple; DMG and .pkg. Same steps as build-macos in
   # cd-cua-spaces.yml (without the release upload and the appcast).
   build-macos:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: darwin-universal (SwiftUI)
     needs: [plan, spacesd-published, macos-rust, web]
     runs-on: macos-26
@@ -631,7 +635,7 @@ jobs:
   electron-native:
     name: Electron native (${{ matrix.label }})
     needs: plan
-    if: needs.plan.outputs.shadow == 'true'
+    if: ${{ (needs.plan.outputs.shadow == 'true') && github.repository == 'trycua/cua' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 120
     permissions:
@@ -663,6 +667,7 @@ jobs:
 
   # Windows: x64 and arm64 packaged and Authenticode signed in parallel.
   electron-windows-pkg:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Electron windows (${{ matrix.arch }})
     needs: [plan, electron-native, web]
     runs-on: windows-latest
@@ -814,6 +819,7 @@ jobs:
   # Linux: x64 and arm64 packaged in parallel (fpm and the AppImage tools run
   # on x64 for both).
   electron-linux-pkg:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Electron linux (${{ matrix.arch }})
     needs: [plan, electron-native, web]
     runs-on: ubuntu-22.04
@@ -887,7 +893,7 @@ jobs:
     name: Assemble the build set
     needs: [plan, build-macos, electron-windows-pkg, electron-linux-pkg]
     # A nightly is published part by part by nightly-cua-spaces.yml.
-    if: inputs.channel != 'nightly'
+    if: ${{ (inputs.channel != 'nightly') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
@@ -954,6 +960,7 @@ jobs:
   # verify-release does on the tag build: Gatekeeper, stapled tickets, strict
   # codesign, launch and Keyvault smoke, Authenticode by Cua AI, Inc.
   verify:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Verify the signed build
     needs: [plan, assemble, build-macos, electron-windows-pkg]
     runs-on: macos-26
@@ -1017,6 +1024,7 @@ jobs:
   # GitHub artifact attestations (SLSA provenance) for every file of the set,
   # the manifest included, once it has passed verification.
   attest:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Attest the build set
     needs: [plan, verify]
     runs-on: ubuntu-latest
@@ -1039,7 +1047,12 @@ jobs:
   summary:
     name: Cost summary
     needs: [plan, assemble, verify, attest]
-    if: always() && needs.plan.result == 'success' && needs.plan.outputs.shadow == 'true' && inputs.channel != 'nightly'
+    if: >-
+      ${{ (always()
+      && needs.plan.result == 'success'
+      && needs.plan.outputs.shadow == 'true'
+      && inputs.channel != 'nightly')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

@@ -71,12 +71,19 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   changes:
     needs: quick
-    if: ${{ !failure() && !cancelled() && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: changes
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -139,7 +146,12 @@ jobs:
 
   rust:
     needs: quick
-    if: ${{ !failure() && !cancelled() && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: rust command-layer tests
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -198,7 +210,13 @@ jobs:
 
   frontend:
     needs: quick
-    if: ${{ !failure() && !cancelled() && ((github.event_name != 'pull_request' || !github.event.pull_request.draft) && (!startsWith(github.head_ref, 'release-please--branches--'))) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (!startsWith(github.head_ref, 'release-please--branches--')))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: vitest + typecheck
     runs-on: ubuntu-24.04
     steps:
@@ -246,7 +264,16 @@ jobs:
     # release-please PRs (fast checks only). Main pushes, manual runs and
     # `ci:full` PRs build them.
     needs: [quick, changes]
-    if: ${{ !failure() && !cancelled() && needs.changes.result == 'success' && ((github.event_name != 'pull_request' || !github.event.pull_request.draft) && (needs.changes.outputs.bundle == 'true' && !startsWith(github.head_ref, 'release-please--branches--') && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full')))) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.changes.result == 'success'
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (needs.changes.outputs.bundle == 'true'
+      && !startsWith(github.head_ref, 'release-please--branches--')
+      && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:full'))))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     strategy:
       fail-fast: false
       matrix:

@@ -29,12 +29,18 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   candidate:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: MCP candidate (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 40

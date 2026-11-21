@@ -32,7 +32,10 @@ concurrency:
 jobs:
   file:
     name: file flaky-test issues
-    if: github.event_name == 'workflow_run' && github.event.workflow_run.conclusion != 'cancelled'
+    if: >-
+      ${{ (github.event_name == 'workflow_run'
+      && github.event.workflow_run.conclusion != 'cancelled')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -61,7 +64,7 @@ jobs:
 
   weekly:
     name: weekly flaky-test issue
-    if: github.event_name != 'workflow_run'
+    if: ${{ (github.event_name != 'workflow_run') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:

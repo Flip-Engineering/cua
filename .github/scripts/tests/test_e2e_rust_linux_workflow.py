@@ -2,6 +2,8 @@ import json
 import subprocess
 import tempfile
 import unittest
+
+from tests.workflow_conditions import job_condition
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -13,7 +15,7 @@ def test_canonical_certification_is_fail_closed_and_complete() -> None:
     certification = workflow.split("\n  certify:\n", 1)[1]
 
     # Manual dispatches and stable-tag release-gate calls both certify.
-    assert "!failure() && !cancelled() && inputs.lane == 'all'" in certification
+    assert job_condition(workflow, "certify").startswith("!failure() && !cancelled() && inputs.lane == 'all'")
     for job in ("source", "shared", "native", "capture", "installer"):
         assert f"needs.{job}.result == 'success'" in certification
     assert "needs: [quick, source, shared, native, capture, installer]" in certification
@@ -46,8 +48,11 @@ class VerifySkillTests(unittest.TestCase):
             self.assertIn(f"      - {path}", workflow.split("  workflow_call:")[0])
         self.assertIn("          - verify", workflow)
         job = workflow.split("\n  verify-skill:\n")[1].split("\n  shared:\n")[0]
+        self.assertEqual(
+            job_condition(workflow, "verify-skill"),
+            "!failure() && !cancelled() && (inputs.lane == '' || inputs.lane == 'verify') && needs.quick.outputs.skip != 'true'",
+        )
         for setting in (
-            "if: ${{ !failure() && !cancelled() && (inputs.lane == '' || inputs.lane == 'verify') && needs.quick.outputs.skip != 'true' }}",
             "timeout-minutes: 25",
             'CUA_E2E_RETRY_ONCE: "0"',
             "key: e2e-shared",
@@ -65,7 +70,7 @@ class VerifySkillTests(unittest.TestCase):
             section = workflow.split(f"\n  {name}:\n")[1].split("    steps:")[0]
             self.assertIn("needs: [quick, source, shared, native, capture, installer]", section)
             self.assertNotIn("verify-skill", section)
-        summary = workflow.split("\n  summary:\n")[1].split("    needs:")[0]
+        summary = job_condition(workflow, "summary")
         self.assertIn("always() && inputs.lane != '' && inputs.lane != 'verify'", summary)
 
     def test_evidence_boundary(self) -> None:

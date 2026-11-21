@@ -49,6 +49,7 @@ concurrency:
 
 jobs:
   build:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: build (${{ matrix.arch }})
     runs-on: ubuntu-24.04
     strategy:
@@ -76,7 +77,10 @@ jobs:
 
   publish:
     needs: build
-    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish)
+    if: >-
+      ${{ (github.event_name == 'push' || (github.event_name == 'workflow_dispatch'
+      && inputs.publish))
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: read

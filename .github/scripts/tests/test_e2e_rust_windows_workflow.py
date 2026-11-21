@@ -1,6 +1,8 @@
 import json
 import os
 from pathlib import Path
+
+from tests.workflow_conditions import job_condition
 import subprocess
 
 import yaml
@@ -21,7 +23,7 @@ def test_canonical_certification_is_fail_closed_and_github_hosted() -> None:
     certification = workflow.split("\n  certify:\n", 1)[1]
 
     # Manual dispatches and stable-tag release-gate calls both certify.
-    assert "if: success() && inputs.lane == 'all'" in certification
+    assert job_condition(workflow, "certify") == "success() && inputs.lane == 'all'"
     assert "needs: [source, shared, native, capture, installer]" in certification
     assert "windows-latest|windows-2022|windows-2025" in certification
     assert "class=github-hosted" in certification

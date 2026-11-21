@@ -58,7 +58,9 @@ env:
 
 jobs:
   swift:
-    if: ${{ (github.event_name != 'pull_request' || !github.event.pull_request.draft) }}
+    if: >-
+      ${{ ((github.event_name != 'pull_request' || !github.event.pull_request.draft))
+      && github.repository == 'trycua/cua' }}
     name: swift tests (macOS)
     runs-on: macos-26
     # Cold, the release cua-sdk build alone nears 45 minutes on macos-26.
@@ -99,7 +101,7 @@ jobs:
   report:
     name: open or update the issue
     needs: swift
-    if: ${{ failure() && github.event_name != 'pull_request' }}
+    if: ${{ (failure() && github.event_name != 'pull_request') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

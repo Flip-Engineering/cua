@@ -68,9 +68,9 @@ jobs:
   # we use that instead.
   resolve-version:
     name: Resolve release version
-    if: |
-      github.event_name != 'release' ||
-      startsWith(github.event.release.tag_name, 'cua-driver-rs-v')
+    if: >-
+      ${{ (github.event_name != 'release' || startsWith(github.event.release.tag_name, 'cua-driver-rs-v'))
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -149,6 +149,7 @@ jobs:
   #   rockylinux:9 — glibc 2.34, RHEL/Rocky/AlmaLinux users
   #   fedora:41  — glibc 2.40, leading-edge RPM users
   distro-smoke:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: "${{ matrix.distro }} (glibc ${{ matrix.glibc_version }})"
     needs: resolve-version
     # Don't block the PR if no release binary exists yet.
@@ -295,7 +296,7 @@ jobs:
   distro-compat-summary:
     name: "Distro compat summary"
     needs: [resolve-version, distro-smoke]
-    if: always()
+    if: ${{ (always()) && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

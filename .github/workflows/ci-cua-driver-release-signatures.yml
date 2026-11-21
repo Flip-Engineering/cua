@@ -27,6 +27,7 @@ concurrency:
 
 jobs:
   signed-release:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: signed 0.28.2 passes
     uses: ./.github/workflows/cua-driver-release-signatures.yml
     with:
@@ -37,6 +38,7 @@ jobs:
       legacy_unsigned_node_runtime: true
 
   unsigned-node-runtime:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: unsigned 0.28.2 Node runtime is rejected
     uses: ./.github/workflows/cua-driver-release-signatures.yml
     with:
@@ -47,6 +49,7 @@ jobs:
       expect_macos: fail
 
   unsigned-release:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: unsigned 0.28.3 is rejected
     uses: ./.github/workflows/cua-driver-release-signatures.yml
     with:

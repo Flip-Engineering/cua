@@ -43,6 +43,7 @@ env:
 
 jobs:
   contract:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: buf lint / format / breaking
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -64,6 +65,7 @@ jobs:
         run: libs/cua/scripts/check-proto.sh
 
   codegen:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: cua-proto codegen + tests
     runs-on: ubuntu-latest
     timeout-minutes: 20
@@ -99,6 +101,7 @@ jobs:
   # generates a Go client that compiles. (The crates.io dry run of the Rust
   # crates is `crates.io dry run` in ci-cua-sdk.yml.)
   tarball:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: proto tarball + generated Go client
     runs-on: ubuntu-latest
     timeout-minutes: 15

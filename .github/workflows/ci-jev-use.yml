@@ -70,12 +70,18 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   unit-python:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Python unit
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -104,7 +110,11 @@ jobs:
 
   unit-typescript:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: TypeScript unit and typecheck
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -124,7 +134,11 @@ jobs:
 
   mock-e2e-linux:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Linux mock E2E
     runs-on: ubuntu-latest
     timeout-minutes: 90
@@ -397,7 +411,12 @@ jobs:
   # Linux-only.
   released-driver-macos:
     needs: quick
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && !failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: macOS released Driver mock E2E
     runs-on: macos-26
     timeout-minutes: 45
@@ -515,7 +534,12 @@ jobs:
   # the harness's own state file as the independent oracle.
   native-appkit-macos:
     needs: quick
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && !failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: macOS native AppKit mock E2E
     runs-on: macos-26
     timeout-minutes: 45
@@ -669,7 +693,12 @@ jobs:
 
   released-driver-windows:
     needs: quick
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && !failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Windows released Driver mock E2E
     runs-on: windows-latest
     timeout-minutes: 45
@@ -785,7 +814,12 @@ jobs:
   # the harness's own state file as the independent oracle.
   native-wpf-windows:
     needs: quick
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && !failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Windows native WPF mock E2E
     runs-on: windows-latest
     timeout-minutes: 45
@@ -933,7 +967,12 @@ jobs:
   # own state file as the independent oracle.
   native-winui3-windows:
     needs: quick
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && !failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Windows native WinUI3 mock E2E
     runs-on: windows-latest
     timeout-minutes: 45
@@ -1082,7 +1121,12 @@ jobs:
   # would put the venv's python3 first on PATH).
   native-gtk3-linux:
     needs: quick
-    if: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ ((github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && !failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Linux native GTK3 mock E2E
     runs-on: ubuntu-latest
     timeout-minutes: 45

@@ -37,7 +37,7 @@ env:
 
 jobs:
   web:
-    if: ${{ !startsWith(github.head_ref, 'release-please--branches--') }}
+    if: ${{ (!startsWith(github.head_ref, 'release-please--branches--')) && github.repository == 'trycua/cua' }}
     name: vitest + typecheck + drift
     runs-on: ubuntu-24.04
     defaults:
@@ -60,7 +60,7 @@ jobs:
       - run: pnpm check
 
   rust:
-    if: ${{ !startsWith(github.head_ref, 'release-please--branches--') }}
+    if: ${{ (!startsWith(github.head_ref, 'release-please--branches--')) && github.repository == 'trycua/cua' }}
     name: cargo test
     runs-on: ubuntu-24.04
     defaults:

@@ -37,6 +37,7 @@ concurrency:
 
 jobs:
   coverage:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: coverage matrix and recordings
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -71,6 +72,7 @@ jobs:
           done
 
   surface:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: surface snapshots (${{ matrix.sdk }})
     runs-on: ubuntu-latest
     timeout-minutes: 15

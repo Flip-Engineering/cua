@@ -25,7 +25,7 @@ concurrency:
 jobs:
   spacesd-published:
     name: cua-spacesd pin is published
-    if: startsWith(github.head_ref, 'release-please--branches--')
+    if: ${{ (startsWith(github.head_ref, 'release-please--branches--')) && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

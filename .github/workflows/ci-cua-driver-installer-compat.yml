@@ -31,6 +31,7 @@ permissions:
 
 jobs:
   scope:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Resolve installer compatibility scope
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -113,7 +114,7 @@ jobs:
   install:
     name: "${{ matrix.os }} / v${{ matrix.version }}"
     needs: scope
-    if: needs.scope.outputs.should_run == 'true'
+    if: ${{ (needs.scope.outputs.should_run == 'true') && github.repository == 'trycua/cua' }}
     strategy:
       fail-fast: false
       matrix:
@@ -195,7 +196,7 @@ jobs:
   installer-compatibility:
     name: Installer compatibility summary
     needs: [scope, install]
-    if: always()
+    if: ${{ (always()) && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -26,6 +26,7 @@ concurrency:
 
 jobs:
   pin:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: The PPA has the pinned Chromium majors
     runs-on: ubuntu-latest
     timeout-minutes: 5

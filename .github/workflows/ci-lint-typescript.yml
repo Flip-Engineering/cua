@@ -20,6 +20,7 @@ concurrency:
 
 jobs:
   lint:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: TypeScript Lint & Format
     runs-on: ubuntu-latest
 

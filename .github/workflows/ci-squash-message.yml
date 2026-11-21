@@ -13,7 +13,13 @@ permissions:
 
 jobs:
   parses:
-    runs-on: ubuntu-latest
+    if: >-
+      ${{ (github.repository == 'trycua/cua' || (github.repository == 'Flip-Engineering/cua'
+      && (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository))) }}
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     steps:
       - uses: actions/checkout@v4
         with:

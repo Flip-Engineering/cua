@@ -32,6 +32,7 @@ concurrency:
 
 jobs:
   bundle:
+    if: ${{ github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     steps:
       - name: Generate release GitHub App token

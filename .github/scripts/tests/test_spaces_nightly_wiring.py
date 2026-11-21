@@ -3,6 +3,8 @@
 Run: python3 -m pytest .github/scripts/tests/test_spaces_nightly_wiring.py
 """
 from pathlib import Path
+
+from tests.workflow_conditions import job_condition
 import re
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -37,7 +39,7 @@ def test_nightly_is_gated_on_main_ci_and_on_changes():
     nightly = source("nightly-cua-spaces.yml")
     assert "spaces_nightly_gate.py" in nightly
     assert "spaces_inputs_tree.sh HEAD" in nightly
-    assert "if: github.ref == 'refs/heads/main'" in nightly
+    assert job_condition(nightly, "plan") == "github.ref == 'refs/heads/main'"
 
 
 def test_nightly_builds_every_platform():

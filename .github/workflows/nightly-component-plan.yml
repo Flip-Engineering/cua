@@ -40,6 +40,7 @@ permissions:
 
 jobs:
   plan:
+    if: ${{ github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.plan.outputs.shouldBuild }}
@@ -129,7 +130,10 @@ jobs:
 
   report-attribution-warning:
     needs: plan
-    if: needs.plan.outputs.attribution_issues != '' && needs.plan.outputs.attribution_issues != '[]'
+    if: >-
+      ${{ (needs.plan.outputs.attribution_issues != ''
+      && needs.plan.outputs.attribution_issues != '[]')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

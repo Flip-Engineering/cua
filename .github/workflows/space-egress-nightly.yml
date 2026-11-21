@@ -48,6 +48,7 @@ env:
 
 jobs:
   containers:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: containers (runc, gVisor) on the engine host
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -90,6 +91,7 @@ jobs:
           sudo env CUA_TEST_POOL_RUNSC=1 PATH="$PATH" "$bin" --ignored --nocapture
 
   vms:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: QEMU and Firecracker VMs in pasta namespaces (KVM)
     runs-on: ${{ vars.CUA_KVM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 120

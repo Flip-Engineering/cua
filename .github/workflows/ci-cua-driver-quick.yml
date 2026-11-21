@@ -25,6 +25,7 @@ env:
 
 jobs:
   focused:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: "Linux / focused contracts (not desktop certification)"
     runs-on: ubuntu-latest
     timeout-minutes: 20

@@ -52,6 +52,7 @@ env:
 
 jobs:
   spacesd:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: cua-spacesd workspace tests (privileged, no skips)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -87,6 +88,7 @@ jobs:
         run: cargo test --workspace --locked
 
   qemu-checkpoint:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: cua-vmm checkpoint and fork of a claimed pool member (QEMU, KVM)
     runs-on: ${{ vars.CUA_KVM_RUNNER || 'ubuntu-24.04' }}
     timeout-minutes: 120

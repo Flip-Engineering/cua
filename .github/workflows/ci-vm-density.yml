@@ -53,12 +53,18 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   unit:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: unit (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
@@ -91,7 +97,12 @@ jobs:
     name: nightly KVM (density tests + bench guard)
     # Also on a pull request labelled ci:vm-density.
     needs: quick
-    if: ${{ !failure() && !cancelled() && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:vm-density')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'ci:vm-density'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     steps:

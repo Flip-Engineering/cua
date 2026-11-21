@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   ale-compat:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: ALE tasks and harness (${{ matrix.deps }})
     runs-on: ubuntu-latest
     timeout-minutes: 30

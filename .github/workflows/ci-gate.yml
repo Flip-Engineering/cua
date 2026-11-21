@@ -18,8 +18,11 @@ permissions:
 
 jobs:
   ci-gate:
+    if: ${{ (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
     name: ci-gate
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     timeout-minutes: 180
     steps:
       # A pull request labelled `release-hold` (or the older `hold`) never merges, auto-merge or not (CUA-3559). The gate
@@ -277,7 +280,7 @@ jobs:
             result=$(python3 "$FLAKY_PY" gate-check --workflow "$name" --quarantine "$QUARANTINE_FILE" <<<"$failed_jobs") || return 0
             [[ "$result" == all ]] || return 0
             attempt=$(api "repos/$GITHUB_REPOSITORY/actions/runs/$run" --jq .run_attempt) || return 0
-            if (( attempt < 2 )) && [[ " $retried " != *" $run "* ]] \
+            if [[ "$GITHUB_REPOSITORY" == trycua/cua ]] && (( attempt < 2 )) && [[ " $retried " != *" $run "* ]] \
                 && gh api -X POST "repos/$GITHUB_REPOSITORY/actions/runs/$run/rerun-failed-jobs" >/dev/null; then
               retried="$retried $run"
               qv=retry

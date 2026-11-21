@@ -64,6 +64,7 @@ env:
 
 jobs:
   reviewed-model:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Broker the pinned reviewed model artifact
     runs-on: ubuntu-latest
     permissions:
@@ -146,6 +147,7 @@ jobs:
           retention-days: 1
 
   supplied-input:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: native review input (${{ matrix.target }})
     needs: reviewed-model
     env:
@@ -705,6 +707,7 @@ jobs:
           retention-days: 7
 
   aggregate:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: aggregate signed review candidates
     needs: supplied-input
     runs-on: ubuntu-latest

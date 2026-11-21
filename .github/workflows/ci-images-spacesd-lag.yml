@@ -35,6 +35,7 @@ concurrency:
 
 jobs:
   lag:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Catalog images on the current cua-spacesd (warning only)
     runs-on: ubuntu-latest
     timeout-minutes: 10

@@ -8,6 +8,8 @@ refused, and no tag is ever moved or created.
 
 from pathlib import Path
 
+from tests.workflow_conditions import upstream_condition
+
 import yaml
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -90,20 +92,21 @@ def test_every_release_gate_keys_on_a_tag_run_including_a_rebuild():
     text, workflow = load()
     jobs = workflow["jobs"]
     for job in ("request-staging-smoke", "staging-gate"):
-        assert jobs[job]["if"].strip() == TAG_RUN, job
-    assert jobs["promote-check"]["if"].strip() == f"{TAG_RUN} && vars.CUA_SPACES_PROMOTE_CHECK == 'true'"
+        assert upstream_condition(jobs[job]["if"]) == TAG_RUN, job
+    assert upstream_condition(jobs["promote-check"]["if"]) == f"{TAG_RUN} && vars.CUA_SPACES_PROMOTE_CHECK == 'true'"
     assert TAG_RUN in jobs["installer-manifest"]["if"]
     assert TAG_RUN in jobs["site-follows-release"]["if"]
     assert "github.repository == 'trycua/cua'" in jobs["site-follows-release"]["if"]
     # No tag-only condition is left behind.
     bare = "startsWith(github.ref, 'refs/tags/cua-spaces-v')"
-    assert text.count(bare) == text.count(TAG_RUN)
+    normalized = " ".join(text.split())
+    assert normalized.count(bare) == normalized.count(TAG_RUN)
     # The release commit, not main's tip, is smoked and gated.
     assert 'request_staging_smoke.sh cua-spaces "$RELEASE_SHA"' in text
     assert 'require_staging_smoke.sh cua-spaces "$RELEASE_SHA"' in text
     # Signing, tag-only publishing and the draft step key on the same switch.
     assert f"TAGGED: ${{{{ {TAG_RUN} }}}}" in text
-    assert f"if: {TAG_RUN}\n" in text
+    assert any(upstream_condition(job.get("if", "")) == TAG_RUN for job in jobs.values())
     # electron-plan plans a rebuild like a tag push (platform patch diff).
     assert "'workflow_dispatch' && inputs.rebuild_tag == '' && 'workflow_dispatch' || 'push'" in text
     assert text.count('[[ "$RELEASE_REF" == refs/tags/cua-spaces-v* ]]') == 2

@@ -63,12 +63,20 @@ jobs:
   # and runs a third of the test steps; `unit` below keeps the check name.
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   shard:
     needs: quick
-    if: ${{ !failure() && !cancelled() && ((github.event_name != 'pull_request' || !github.event.pull_request.draft) && (!startsWith(github.head_ref, 'release-please--branches--'))) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (!startsWith(github.head_ref, 'release-please--branches--')))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Rust Windows shard ${{ matrix.shard }}/3
     runs-on: windows-latest
     strategy:
@@ -259,7 +267,13 @@ jobs:
   # 1.97.1 toolchain. Runs beside the shards so it adds no wall-clock time.
   clippy:
     needs: quick
-    if: ${{ !failure() && !cancelled() && ((github.event_name != 'pull_request' || !github.event.pull_request.draft) && (!startsWith(github.head_ref, 'release-please--branches--'))) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && ((github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (!startsWith(github.head_ref, 'release-please--branches--')))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Rust Windows clippy
     runs-on: windows-latest
     timeout-minutes: 45
@@ -279,7 +293,12 @@ jobs:
 
   # The one check that stood for the whole suite before it was sharded.
   unit:
-    if: ${{ !cancelled() && (github.event_name != 'pull_request' || !github.event.pull_request.draft) && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!cancelled()
+      && (github.event_name != 'pull_request' || !github.event.pull_request.draft)
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Rust Windows unit and compile
     runs-on: ubuntu-latest
     needs: [quick, shard, clippy]

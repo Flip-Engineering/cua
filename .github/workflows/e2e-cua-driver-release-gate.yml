@@ -81,9 +81,15 @@ jobs:
 
   decide:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
     name: "E2E gate / decide"
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     timeout-minutes: 10
     outputs:
       run: ${{ steps.decide.outputs.run }}
@@ -193,7 +199,12 @@ jobs:
   linux:
     name: "gate / Linux E2E"
     needs: [quick, decide]
-    if: ${{ !failure() && !cancelled() && needs.decide.outputs.run == 'true' && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.decide.outputs.run == 'true'
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     permissions:
       actions: read
       contents: read
@@ -207,7 +218,12 @@ jobs:
   windows:
     name: "gate / Windows E2E"
     needs: [quick, decide]
-    if: ${{ !failure() && !cancelled() && needs.decide.outputs.run == 'true' && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.decide.outputs.run == 'true'
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     permissions:
       actions: read
       contents: read
@@ -219,14 +235,18 @@ jobs:
       lane: ${{ needs.decide.outputs.lanes == 'quick' && 'shared' || needs.decide.outputs.lanes == 'queue' && 'native,capture,installer' || 'all' }}
       harness_filter: ${{ needs.decide.outputs.lanes == 'quick' && 'electron' || '' }}
 
-  # Hosted macOS seeds TCC state, so it never runs on pull_request events
-  # (the probe rejects them). PRs use `macos-pr` below instead.
+  # Upstream PRs dispatch the hosted harness. Flip uses its own logged-in lab.
   macos:
-    name: "gate / macOS hosted E2E"
+    name: ${{ github.repository == 'Flip-Engineering/cua' && 'gate / macOS lab E2E' || 'gate / macOS hosted E2E' }}
     needs: [quick, decide]
     # Not in the merge queue either: queued hosted macOS runners and the lane (51 to 73 minutes)
     # outlast the queue's 60-minute timeout. The full run after merge runs it.
-    if: ${{ !failure() && !cancelled() && needs.decide.outputs.run == 'true' && github.event_name != 'pull_request' && needs.decide.outputs.lanes != 'queue' && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ !failure() && !cancelled() && needs.decide.outputs.run == 'true'
+          && needs.decide.outputs.lanes != 'queue' && needs.quick.outputs.skip != 'true'
+          && (github.event_name != 'pull_request'
+              || (github.repository == 'Flip-Engineering/cua'
+                  && github.event.pull_request.head.repo.full_name == github.repository)) }}
     permissions:
       actions: read
       contents: read
@@ -234,13 +254,21 @@ jobs:
     uses: ./.github/workflows/e2e-rust-macos.yml
     with:
       source_sha: ${{ github.sha }}
+      quick: ${{ github.repository == 'Flip-Engineering/cua' && needs.decide.outputs.lanes == 'quick' }}
 
   # Gated same-repo PRs: dispatch the hosted macOS workflow on the PR head
   # branch (an allowed TCC-seeding event), wait, and mirror its conclusion.
   macos-pr:
     name: "gate / macOS hosted E2E (dispatched)"
     needs: [quick, decide]
-    if: ${{ !failure() && !cancelled() && needs.decide.outputs.run == 'true' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.decide.outputs.run == 'true'
+      && github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     # Hosted macOS runners queue for an hour or more under load, and the queue
     # time sits inside the dispatched run, so it counts against the wait below.
@@ -321,7 +349,14 @@ jobs:
     needs: [quick, decide]
     # Full runs only: the quick PR lane and the merge queue (40 to 53 minutes, too close to its
     # 60-minute timeout) leave the browser lanes to the run after merge.
-    if: ${{ !failure() && !cancelled() && needs.decide.outputs.run == 'true' && needs.decide.outputs.lanes != 'quick' && needs.decide.outputs.lanes != 'queue' && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.decide.outputs.run == 'true'
+      && needs.decide.outputs.lanes != 'quick'
+      && needs.decide.outputs.lanes != 'queue'
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     permissions:
       actions: read
       contents: read
@@ -334,9 +369,14 @@ jobs:
   # quick runs only on pull_request and merge_group, so every other event reports it skipped.
   result:
     name: "E2E gate / result"
-    if: ${{ always() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (always()
+      && needs.quick.outputs.skip != 'true')
+      && (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
     needs: [quick, decide, linux, windows, macos, macos-pr, browsers]
-    runs-on: ubuntu-latest
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     timeout-minutes: 5
     steps:
       - name: Evaluate lanes
@@ -346,6 +386,7 @@ jobs:
           EVENT: ${{ github.event_name }}
           DECIDE: ${{ needs.decide.result }}
           LANES: ${{ toJSON(needs) }}
+          LAB_REQUIRED: ${{ github.repository == 'Flip-Engineering/cua' && needs.decide.outputs.lanes != 'queue' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
         run: |
           set -euo pipefail
           if [[ "$DECIDE" != success ]]; then
@@ -355,7 +396,22 @@ jobs:
             echo "Release-gate lanes not required for this change." | tee -a "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
-          bad=$(jq -r 'to_entries[] | select(.key != "decide") | select(.value.result != "success") | select((.key != "quick" or .value.result != "skipped" or env.EVENT == "pull_request" or env.EVENT == "merge_group") and (.key != "macos" or .value.result != "skipped" or (env.EVENT != "pull_request" and env.LANES_SIZE != "queue")) and (.key != "macos-pr" or .value.result != "skipped") and (.key != "browsers" or .value.result != "skipped" or (env.LANES_SIZE != "quick" and env.LANES_SIZE != "queue"))) | "\(.key)=\(.value.result)"' <<< "$LANES")
+          bad=$(jq -r '
+            to_entries[]
+            | select(.key != "decide" and .value.result != "success")
+            | select(
+                if .value.result != "skipped" then true
+                elif .key == "quick" then env.EVENT == "pull_request" or env.EVENT == "merge_group"
+                elif .key == "macos-pr" then false
+                elif env.GITHUB_REPOSITORY == "Flip-Engineering/cua" then
+                  .key == "macos" and env.LAB_REQUIRED == "true"
+                elif .key == "macos" then env.EVENT != "pull_request" and env.LANES_SIZE != "queue"
+                elif .key == "browsers" then env.LANES_SIZE != "quick" and env.LANES_SIZE != "queue"
+                else true
+                end
+              )
+            | "\(.key)=\(.value.result)"
+          ' <<< "$LANES")
           if [[ -n "$bad" ]]; then
             echo "::error::release-gate lanes not green: $bad"; exit 1
           fi
@@ -369,7 +425,12 @@ jobs:
     name: "E2E gate / nightly report"
     # A post-merge push without gated paths runs no lanes (decide.run == false): every lane
     # is then `skipped`, which is not a failure, so there is nothing to report.
-    if: ${{ always() && needs.decide.outputs.run == 'true' && (needs.decide.outputs.mode == 'nightly' || needs.decide.outputs.mode == 'post-merge') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (always()
+      && needs.decide.outputs.run == 'true'
+      && (needs.decide.outputs.mode == 'nightly' || needs.decide.outputs.mode == 'post-merge')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     needs: [quick, decide, linux, windows, macos, macos-pr, browsers]
     runs-on: ubuntu-latest
     timeout-minutes: 10

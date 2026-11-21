@@ -106,12 +106,18 @@ permissions:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   macos-uninstall:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: macOS uninstall regressions
     runs-on: macos-26
     timeout-minutes: 10
@@ -138,7 +144,11 @@ jobs:
 
   windows-uninstall:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: windows-latest
     timeout-minutes: 5
     permissions:
@@ -156,7 +166,11 @@ jobs:
 
   test:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
 

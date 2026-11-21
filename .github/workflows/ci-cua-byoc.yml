@@ -49,6 +49,7 @@ concurrency:
 
 jobs:
   rust:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: providers against their API mocks
     runs-on: ubuntu-latest
     timeout-minutes: 60

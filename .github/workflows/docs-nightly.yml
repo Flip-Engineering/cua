@@ -39,6 +39,7 @@ env:
 
 jobs:
   windows:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: windows (PowerShell blocks)
     runs-on: windows-latest
     timeout-minutes: 30
@@ -58,6 +59,7 @@ jobs:
           path: ${{ runner.temp }}/docs-windows
 
   lume:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: lume (macOS shell blocks)
     runs-on: macos-latest
     timeout-minutes: 30
@@ -77,7 +79,10 @@ jobs:
 
   lume-vm:
     name: lume VM lane (self-hosted)
-    if: vars.CUA_E2E_LUME_RUNNER != '' && github.event_name != 'pull_request'
+    if: >-
+      ${{ (vars.CUA_E2E_LUME_RUNNER != ''
+      && github.event_name != 'pull_request')
+      && github.repository == 'trycua/cua' }}
     runs-on: ["self-hosted", "macOS", "${{ vars.CUA_E2E_LUME_RUNNER }}"]
     timeout-minutes: 120
     env:
@@ -97,7 +102,7 @@ jobs:
   report:
     name: open or update the nightly issue
     needs: [windows, lume, lume-vm]
-    if: failure() && github.event_name == 'schedule'
+    if: ${{ (failure() && github.event_name == 'schedule') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     permissions:
       issues: write

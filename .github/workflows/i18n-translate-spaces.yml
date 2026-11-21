@@ -41,6 +41,7 @@ env:
 
 jobs:
   translate:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: translate and open PR
     runs-on: ubuntu-24.04
     timeout-minutes: 30

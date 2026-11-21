@@ -77,12 +77,19 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   pacman:
     needs: quick
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Arch native pacman updates
     runs-on: ubuntu-latest
     container: archlinux:base-devel
@@ -139,7 +146,12 @@ jobs:
 
   unit:
     needs: quick
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Rust Linux unit and compile
     runs-on: ubuntu-latest
     # 10 to 14 minutes warm. The headroom covers a run with neither the

@@ -42,6 +42,7 @@ env:
 
 jobs:
   linux-kvm:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: linux-kvm
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -85,7 +86,10 @@ jobs:
 
   macos-hvf:
     name: macos-hvf (self-hosted)
-    if: vars.CUA_E2E_LUME_RUNNER != '' && github.event_name != 'pull_request'
+    if: >-
+      ${{ (vars.CUA_E2E_LUME_RUNNER != ''
+      && github.event_name != 'pull_request')
+      && github.repository == 'trycua/cua' }}
     runs-on: ["self-hosted", "macOS", "${{ vars.CUA_E2E_LUME_RUNNER }}"]
     timeout-minutes: 60
     steps:

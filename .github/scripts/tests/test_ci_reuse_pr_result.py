@@ -2,6 +2,8 @@
 
 import json
 import re
+
+from tests.workflow_conditions import upstream_condition
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -472,7 +474,7 @@ def test_cua_sdk_jobs_in_the_subset_skip_only_when_it_is_reused():
     skip = "needs.reuse.outputs.pr_subset != 'true'"
     for job_id in ("crates-dry-run", "kotlin", "build-sdk", "build-fixtures", "build-cli", "browser"):
         assert skip in wf["jobs"][job_id]["if"], job_id
-        assert wf["jobs"][job_id]["if"].startswith("${{ !cancelled() && ")
+        assert upstream_condition(wf["jobs"][job_id]["if"]).startswith("!cancelled() && ")
     # The macOS and Windows legs of python/node still run when the Linux builds are skipped.
     for job_id in ("python", "node"):
         cond = wf["jobs"][job_id]["if"]

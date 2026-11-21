@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   emudhra-distrust:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Lockfiles and manifests distrust the compromised eMudhra intermediates
     runs-on: ubuntu-latest
     timeout-minutes: 5

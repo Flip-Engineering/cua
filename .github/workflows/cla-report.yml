@@ -20,9 +20,12 @@ jobs:
   report:
     name: cla-report
     if: >-
-      github.event.workflow_run.event == 'pull_request' &&
-      github.event.workflow_run.conclusion == 'success'
-    runs-on: ubuntu-latest
+      ${{ (github.event.workflow_run.event == 'pull_request'
+      && github.event.workflow_run.conclusion == 'success')
+      && (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - name: Check out the report script from the default branch

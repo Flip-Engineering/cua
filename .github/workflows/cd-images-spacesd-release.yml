@@ -110,7 +110,7 @@ jobs:
   # here, so each grant is the union of its jobs' own blocks.
   linux:
     needs: resolve
-    if: needs.resolve.outputs.build == 'true'
+    if: ${{ (needs.resolve.outputs.build == 'true') && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/cd-image-linux.yml
     permissions:
       contents: write
@@ -125,7 +125,7 @@ jobs:
 
   omarchy:
     needs: resolve
-    if: needs.resolve.outputs.build == 'true'
+    if: ${{ (needs.resolve.outputs.build == 'true') && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/cd-image-omarchy.yml
     permissions:
       contents: write
@@ -137,7 +137,7 @@ jobs:
 
   windows:
     needs: resolve
-    if: needs.resolve.outputs.build == 'true'
+    if: ${{ (needs.resolve.outputs.build == 'true') && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/cd-image-windows.yml
     permissions:
       contents: write
@@ -149,7 +149,7 @@ jobs:
   # job opens the bench catalog PR itself.
   bench:
     needs: resolve
-    if: needs.resolve.outputs.build == 'true'
+    if: ${{ (needs.resolve.outputs.build == 'true') && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/cd-bench-images.yml
     # The release app secrets, for the catalog PR (see cd-bench-images.yml).
     secrets: inherit
@@ -165,7 +165,7 @@ jobs:
     needs: [resolve, linux, omarchy, windows, bench]
     # Also after a failed or skipped build: whatever did reach the version is
     # pinned, and the PR lists the rest as pending.
-    if: ${{ !cancelled() && needs.resolve.result == 'success' }}
+    if: ${{ (!cancelled() && needs.resolve.result == 'success') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

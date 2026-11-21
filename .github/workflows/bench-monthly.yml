@@ -56,7 +56,10 @@ env:
 jobs:
   run:
     name: macOS benchmarks (self-hosted)
-    if: github.repository_owner == 'trycua' && vars.CUA_E2E_LUME_RUNNER != ''
+    if: >-
+      ${{ (github.repository_owner == 'trycua'
+      && vars.CUA_E2E_LUME_RUNNER != '')
+      && github.repository == 'trycua/cua' }}
     runs-on: ["self-hosted", "macOS", "${{ vars.CUA_E2E_LUME_RUNNER }}"]
     timeout-minutes: 720
     outputs:
@@ -230,11 +233,12 @@ jobs:
     name: Publish to the website (BENCH_PUBLISH_SITE)
     needs: run
     if: >-
-      vars.BENCH_PUBLISH_SITE == 'true' &&
-      github.event_name != 'pull_request' &&
-      github.repository_owner == 'trycua' &&
-      needs.run.result == 'success' &&
-      needs.run.outputs.released == 'true'
+      ${{ (vars.BENCH_PUBLISH_SITE == 'true'
+      && github.event_name != 'pull_request'
+      && github.repository_owner == 'trycua'
+      && needs.run.result == 'success'
+      && needs.run.outputs.released == 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:

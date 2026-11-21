@@ -28,6 +28,7 @@ permissions:
 
 jobs:
   setup:
+    if: ${{ github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     outputs:
       platforms: ${{ steps.set-platforms.outputs.platforms }}
@@ -41,6 +42,7 @@ jobs:
           fi
 
   build:
+    if: ${{ github.repository == 'trycua/cua' }}
     needs: setup
     # Native arm64 runner (free for public repos): QEMU emulation segfaults
     # (exit 139) in dpkg post-install scripts.
