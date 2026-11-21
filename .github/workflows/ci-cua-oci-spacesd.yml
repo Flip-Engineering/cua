@@ -52,12 +52,18 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   static:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: static cua-spacesd (musl)
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -100,7 +106,12 @@ jobs:
   containers:
     name: containers (docker, runc)
     needs: [quick, static]
-    if: ${{ !failure() && !cancelled() && needs.static.result == 'success' && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.static.result == 'success'
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 60
     steps:

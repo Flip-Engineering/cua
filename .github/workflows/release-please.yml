@@ -419,9 +419,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     if: >-
-      !cancelled() && github.repository == 'trycua/cua' &&
-      (github.event_name == 'push' ||
-       (inputs.component == 'automatic' && inputs.bump == 'automatic'))
+      ${{ (!cancelled()
+      && github.repository == 'trycua/cua'
+      && (github.event_name == 'push' || (inputs.component == 'automatic'
+      && inputs.bump == 'automatic')))
+      && github.repository == 'trycua/cua' }}
     steps:
       - name: Generate release GitHub App token
         id: app-token

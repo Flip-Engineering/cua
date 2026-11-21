@@ -45,7 +45,7 @@ concurrency:
 jobs:
   dry-run:
     name: Validate @cua/driver publish bundle
-    if: github.event_name == 'pull_request'
+    if: ${{ (github.event_name == 'pull_request') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -94,7 +94,7 @@ jobs:
 
   publish:
     name: Publish ${{ inputs.version }} as @${{ inputs.owner }}/driver
-    if: github.event_name == 'workflow_dispatch'
+    if: ${{ (github.event_name == 'workflow_dispatch') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read

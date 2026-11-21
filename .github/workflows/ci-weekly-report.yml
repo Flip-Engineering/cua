@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   report:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: weekly CI speed issue
     runs-on: ubuntu-latest
     timeout-minutes: 20

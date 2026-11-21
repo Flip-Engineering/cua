@@ -51,6 +51,7 @@ env:
 
 jobs:
   smoke:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: S1 chooser smoke with pinned weights (CPU, text + multimodal)
     runs-on: ubuntu-latest
     # Hosted runners vary: with AVX512-BF16 this takes about 40 minutes; without
@@ -244,6 +245,7 @@ jobs:
           retention-days: 14
 
   driver-e2e:
+    if: ${{ github.repository == 'trycua/cua' }}
     # Canonical Linux X11 row for the model-backed perception loop: Driver
     # captures the Electron harness, the published cua-perception extension
     # parses the capture, Cua-S1-4B chooses one region, Driver clicks it with

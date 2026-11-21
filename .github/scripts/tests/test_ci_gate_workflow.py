@@ -1,6 +1,8 @@
 import json
 import os
 from pathlib import Path
+
+from tests.workflow_conditions import upstream_condition
 import subprocess
 
 import pytest
@@ -22,7 +24,7 @@ def test_required_workflow_queue_wiring(filename):
     workflow = yaml.safe_load((WORKFLOWS / filename).read_text())
     assert 'merge_group' in workflow[True]
     for job in workflow['jobs'].values():
-        assert job['if'] in (
+        assert upstream_condition(job['if']) in (
             "github.event_name != 'merge_group'",
             "always() && github.event_name != 'merge_group'",
         )
@@ -252,13 +254,14 @@ gh() { if [[ "$*" == *rerun-failed-jobs* ]]; then touch "$STATE/reran"; echo 2 >
 '''
 
 
-def run_quarantine_gate(tmp_path, check, attempt='1', after='1\t11\tbuild\tsuccess\tcompleted'):
+def run_quarantine_gate(tmp_path, check, attempt='1', after='1\t11\tbuild\tsuccess\tcompleted',
+                        repository='trycua/cua'):
     stub = tmp_path / 'flaky.py'
     stub.write_text(f'import sys; sys.stdin.read(); print({check!r})\n')
     (tmp_path / 'attempt').write_text(attempt)
     return subprocess.run(
         ['bash', '-e', '-c', QUARANTINE_MOCK + SCRIPT[SCRIPT.index('sha=$PR_SHA'):]],
-        env={**os.environ, 'PR_SHA': 'abc', 'QUEUE_REF': '', 'GITHUB_REPOSITORY': 'test/repo',
+        env={**os.environ, 'PR_SHA': 'abc', 'QUEUE_REF': '', 'GITHUB_REPOSITORY': repository,
              'GITHUB_RUN_ID': '99', 'ROWS': '1\t11\tbuild\tfailure\tcompleted', 'ROWS_AFTER': after,
              'JOBS': '5\tlinux-kvm (concurrent)', 'OLDER_JOBS': '', 'ROWS_DIR': '', 'STATE': str(tmp_path),
              'FLAKY_PY': str(stub), 'QUARANTINE_FILE': 'q.json', 'MAX_SLEEPS': '12', 'MAX_SECONDS': str(10**9)},
@@ -272,6 +275,11 @@ def test_gate_reruns_a_quarantined_flake_once_and_passes_when_it_passes(tmp_path
     assert (tmp_path / 'reran').exists()
     assert 'rerunning its failed jobs once' in done.stdout
     assert done.stdout.strip().splitlines()[-1] == 'build: pass'
+
+def test_fork_gate_does_not_rerun_historical_jobs(tmp_path):
+    done = run_quarantine_gate(tmp_path, 'all', repository='Flip-Engineering/cua')
+    assert done.returncode == 0, done.stderr
+    assert not (tmp_path / 'reran').exists()
 
 
 def test_gate_does_not_fail_on_a_quarantined_flake_that_fails_again(tmp_path):
@@ -317,7 +325,7 @@ def test_quick_stage_is_wired_into_heavy_workflows():
         assert jobs['quick']['uses'] == './.github/workflows/ci-quick.yml', path.name
         # The stage starts on pull requests and merge queue entries (CUA-3856).
         assert 'merge_group' in workflow[True], path.name
-        assert jobs['quick']['if'] == "(github.event_name == 'pull_request' || github.event_name == 'merge_group')"
+        assert upstream_condition(jobs['quick']['if']) == "(github.event_name == 'pull_request' || github.event_name == 'merge_group')"
         for name, job in jobs.items():
             if name == 'quick':
                 continue
@@ -448,7 +456,10 @@ def test_the_quick_workflow_a_fork_relies_on_is_safe_to_run_on_its_code():
     assert wf['permissions'] == {'contents': 'read'}
     text = (WORKFLOWS / 'ci-quick.yml').read_text()
     assert 'secrets.' not in text
-    assert 'self-hosted' not in text
+    quick = wf['jobs']['quick']
+    assert "'ubuntu-latest'" in quick['runs-on']
+    assert "github.repository == 'Flip-Engineering/cua'" in quick['runs-on']
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in quick['if']
 
 
 def test_quick_stage_runs_once_per_commit():

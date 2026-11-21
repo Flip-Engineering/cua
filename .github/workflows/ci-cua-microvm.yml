@@ -57,12 +57,18 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   unit:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: unit (linux)
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -105,7 +111,11 @@ jobs:
 
   macos:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: unit (macos)
     runs-on: macos-26
     timeout-minutes: 45
@@ -155,7 +165,13 @@ jobs:
   vz-e2e:
     name: vz e2e + perf guard (self-hosted Mac)
     needs: quick
-    if: ${{ !failure() && !cancelled() && (vars.CUA_E2E_LUME_RUNNER != '' && github.event_name != 'pull_request') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (vars.CUA_E2E_LUME_RUNNER != ''
+      && github.event_name != 'pull_request')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ["self-hosted", "macOS", "${{ vars.CUA_E2E_LUME_RUNNER }}"]
     timeout-minutes: 120
     steps:

@@ -65,12 +65,18 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   hermetic:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: hermetic (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -115,7 +121,12 @@ jobs:
     name: E2B SDK surface
     # Not on main pushes: those exist to keep the hermetic job's Rust cache warm.
     needs: quick
-    if: ${{ !failure() && !cancelled() && (github.event_name != 'push') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (github.event_name != 'push')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -141,7 +152,12 @@ jobs:
     # Paid E2B sandboxes and a live provider: the weekly run and manual runs only,
     # never the main pushes that keep the Rust cache warm.
     needs: quick
-    if: ${{ !failure() && !cancelled() && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     env:

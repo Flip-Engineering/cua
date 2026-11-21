@@ -15,8 +15,12 @@ permissions:
 jobs:
   contributor-attribution:
     name: contributor-attribution
-    if: github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
+    if: >-
+      ${{ (github.event_name != 'merge_group')
+      && (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     steps:
       # For pull_request, github.sha is the merge commit, which contains the pull request's
       # own code. Check out the tip of the base branch instead (the PR's recorded base.sha can

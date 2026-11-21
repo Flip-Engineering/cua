@@ -46,6 +46,7 @@ env:
 
 jobs:
   layering:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: layering guard
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -54,6 +55,7 @@ jobs:
       - run: bash scripts/check-elastic-layering.sh
 
   core:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: solver, orchestration, routed Spaces
     runs-on: ubuntu-latest
     timeout-minutes: 75

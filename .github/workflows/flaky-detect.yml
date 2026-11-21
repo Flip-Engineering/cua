@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   scan:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: scan reruns for flaky jobs
     runs-on: ubuntu-latest
     timeout-minutes: 30

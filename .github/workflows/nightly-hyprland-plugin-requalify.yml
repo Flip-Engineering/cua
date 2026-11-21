@@ -117,7 +117,7 @@ jobs:
 
   requalify:
     needs: detect
-    if: needs.detect.outputs.count != '0'
+    if: ${{ (needs.detect.outputs.count != '0') && github.repository == 'trycua/cua' }}
     name: ${{ matrix.channel }} hyprland ${{ matrix.hyprland }}, plugin ${{ matrix.ref }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -209,7 +209,7 @@ jobs:
 
   report:
     needs: [detect, requalify]
-    if: always() && needs.detect.result == 'success'
+    if: ${{ (always() && needs.detect.result == 'success') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:

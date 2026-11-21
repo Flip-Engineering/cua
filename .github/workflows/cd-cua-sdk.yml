@@ -132,7 +132,6 @@ jobs:
     needs: version
     name: native ${{ matrix.label }}
     runs-on:
-      group: ${{ matrix.runner.group }}
       labels: [self-hosted, X64, "${{ matrix.runner.os }}", "${{ matrix.runner.label }}"]
     timeout-minutes: 240
     container: ${{ matrix.container }}
@@ -149,12 +148,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { label: linux-x64-gnu, runner: { group: baton2-native-homelab, os: Linux, label: baton2-native-linux-x64 }, target: x86_64-unknown-linux-gnu, container: "debian:11", lib: libcua_sdk.so, exe: cua }
-          - { label: linux-arm64-gnu, runner: { group: baton2-native-homelab, os: Linux, label: baton2-native-linux-x64 }, target: aarch64-unknown-linux-gnu, container: "arm64v8/debian:11", lib: libcua_sdk.so, exe: cua }
-          - { label: darwin-arm64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, target: aarch64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
-          - { label: darwin-x64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, target: x86_64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
-          - { label: win32-x64-msvc, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, target: x86_64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe, goarch: amd64 }
-          - { label: win32-arm64-msvc, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, target: aarch64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe, goarch: arm64 }
+          - { label: linux-x64-gnu, runner: { os: Linux, label: baton2-native-linux-x64 }, target: x86_64-unknown-linux-gnu, container: "debian:11", lib: libcua_sdk.so, exe: cua }
+          - { label: linux-arm64-gnu, runner: { os: Linux, label: baton2-native-linux-x64 }, target: aarch64-unknown-linux-gnu, container: "arm64v8/debian:11", lib: libcua_sdk.so, exe: cua }
+          - { label: darwin-arm64, runner: { os: macOS, label: flip-macos-lab }, target: aarch64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
+          - { label: darwin-x64, runner: { os: macOS, label: flip-macos-lab }, target: x86_64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
+          - { label: win32-x64-msvc, runner: { os: Windows, label: flip-windows-lab }, target: x86_64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe, goarch: amd64 }
+          - { label: win32-arm64-msvc, runner: { os: Windows, label: flip-windows-lab }, target: aarch64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe, goarch: arm64 }
     defaults:
       run:
         shell: bash
@@ -452,19 +451,18 @@ jobs:
     needs: [version, native]
     name: wheel ${{ matrix.platform }}-${{ matrix.arch }}
     runs-on:
-      group: ${{ matrix.runner.group }}
       labels: [self-hosted, X64, "${{ matrix.runner.os }}", "${{ matrix.runner.label }}"]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux, arch: x86_64, runner: { group: baton2-native-homelab, os: Linux, label: baton2-native-linux-x64 }, native: linux-x64-gnu, lib: libcua_sdk.so }
-          - { platform: linux, arch: arm64, runner: { group: baton2-native-homelab, os: Linux, label: baton2-native-linux-x64 }, native: linux-arm64-gnu, lib: libcua_sdk.so }
+          - { platform: linux, arch: x86_64, runner: { os: Linux, label: baton2-native-linux-x64 }, native: linux-x64-gnu, lib: libcua_sdk.so }
+          - { platform: linux, arch: arm64, runner: { os: Linux, label: baton2-native-linux-x64 }, native: linux-arm64-gnu, lib: libcua_sdk.so }
           # One wheel per macOS arch: a universal2 wheel is over PyPI's 100 MB file limit.
-          - { platform: darwin, arch: arm64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, native: darwin-arm64, lib: libcua_sdk.dylib }
-          - { platform: darwin, arch: x86_64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, native: darwin-x64, lib: libcua_sdk.dylib }
-          - { platform: windows, arch: x86_64, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, native: win32-x64-msvc, lib: cua_sdk.dll }
-          - { platform: windows, arch: arm64, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, native: win32-arm64-msvc, lib: cua_sdk.dll }
+          - { platform: darwin, arch: arm64, runner: { os: macOS, label: flip-macos-lab }, native: darwin-arm64, lib: libcua_sdk.dylib }
+          - { platform: darwin, arch: x86_64, runner: { os: macOS, label: flip-macos-lab }, native: darwin-x64, lib: libcua_sdk.dylib }
+          - { platform: windows, arch: x86_64, runner: { os: Windows, label: flip-windows-lab }, native: win32-x64-msvc, lib: cua_sdk.dll }
+          - { platform: windows, arch: arm64, runner: { os: Windows, label: flip-windows-lab }, native: win32-arm64-msvc, lib: cua_sdk.dll }
     defaults:
       run:
         shell: bash
@@ -631,9 +629,7 @@ jobs:
   xcframework-slice:
     name: xcframework-slice (${{ matrix.target }})
     needs: version
-    runs-on:
-      group: flip-lab-os
-      labels: [self-hosted, macOS, X64, flip-macos-lab]
+    runs-on: [self-hosted, macOS, X64, flip-macos-lab]
     # A slice takes about 25 minutes.
     timeout-minutes: 60
     strategy:
@@ -669,9 +665,7 @@ jobs:
 
   xcframework:
     needs: [version, xcframework-slice]
-    runs-on:
-      group: flip-lab-os
-      labels: [self-hosted, macOS, X64, flip-macos-lab]
+    runs-on: [self-hosted, macOS, X64, flip-macos-lab]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

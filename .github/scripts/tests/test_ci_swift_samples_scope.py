@@ -3,6 +3,8 @@
 import json
 import os
 import re
+
+from tests.workflow_conditions import upstream_condition
 import shutil
 import subprocess
 import sys
@@ -295,10 +297,11 @@ class WorkflowWiringTests(unittest.TestCase):
         expression = expression.replace("&&", " and ").replace("||", " or ").replace("!", " not ").replace("\0", "!=")
         for name, key in (("needs.changes.outputs.run", "run"), ("needs.changes.outputs.typescript", "typescript"),
                           ("needs.quick.outputs.skip", "skip"),
-                          ("github.head_ref", "head_ref"), ("github.event_name", "event_name")):
+                          ("github.head_ref", "head_ref"), ("github.event_name", "event_name"),
+                          ("github.repository", "repository")):
             expression = expression.replace(name, key)
         # `skip` is the shared scope decision (ci-quick.yml); these scenarios are all in scope.
-        return eval(expression, {"__builtins__": {}}, {"event_name": "pull_request", "skip": "false", **context})
+        return eval(expression, {"__builtins__": {}}, {"event_name": "pull_request", "skip": "false", "repository": "trycua/cua", **context})
 
     def test_macos_job_waits_for_the_scope_job(self):
         for lane in LANES:
@@ -311,7 +314,7 @@ class WorkflowWiringTests(unittest.TestCase):
             self.assertIn(f"scope {lane}", script)
             # Only the quick stage (ci-quick.yml) comes before the scope job.
             self.assertEqual(changes["needs"], "quick")
-            self.assertEqual(changes["if"], "${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}")
+            self.assertEqual(upstream_condition(changes["if"]), "!failure() && !cancelled() && needs.quick.outputs.skip != 'true'")
             swift = jobs["swift"]
             self.assertEqual(swift["needs"], ["quick", "changes"])
             # The arm64 larger runner of the same macOS image (macos-26 is 3-core).

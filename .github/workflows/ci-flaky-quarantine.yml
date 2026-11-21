@@ -21,6 +21,7 @@ concurrency:
 
 jobs:
   quarantine:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: quarantine list and flaky tooling
     runs-on: ubuntu-latest
     timeout-minutes: 10

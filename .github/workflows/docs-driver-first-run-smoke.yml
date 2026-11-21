@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   first-run:
+    if: ${{ github.repository == 'trycua/cua' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:

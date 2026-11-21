@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   compare-links:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: compare links
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -36,6 +37,7 @@ jobs:
         run: python3 -m unittest tests.test_product_compare_links -v
 
   bench-results:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: bench results
     runs-on: ubuntu-latest
     timeout-minutes: 5

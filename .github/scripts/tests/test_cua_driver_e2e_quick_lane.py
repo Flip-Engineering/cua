@@ -3,9 +3,16 @@
 Run: python3 .github/scripts/tests/test_cua_driver_e2e_quick_lane.py
 """
 
+import json
+import os
 import re
+import subprocess
 import unittest
 from pathlib import Path
+
+import yaml
+
+from tests.workflow_conditions import job_condition
 
 ROOT = Path(__file__).resolve().parents[3]
 WF = ROOT / ".github/workflows"
@@ -75,22 +82,47 @@ class QuickLane(unittest.TestCase):
         self.assertEqual(files("seq 300"), [])
         self.assertEqual(len(files("seq 299")), 299)
 
-    def test_browser_lanes_are_full_only_and_do_not_fail_the_quick_result(self):
+    def test_release_gate_skips_only_lanes_outside_the_selected_scope(self):
+        step = yaml.safe_load(GATE)["jobs"]["result"]["steps"][0]["run"]
+        for repo, required, lanes, macos, expected in (
+            ("trycua/cua", False, "quick", "skipped", 0),
+            ("trycua/cua", False, "full", "skipped", 1),
+            ("Flip-Engineering/cua", True, "quick", "success", 0),
+            ("Flip-Engineering/cua", True, "quick", "skipped", 1),
+            ("Flip-Engineering/cua", True, "quick", "failure", 1),
+            ("Flip-Engineering/cua", False, "queue", "skipped", 0),
+        ):
+            upstream = repo == "trycua/cua"
+            jobs = {
+                "quick": "success", "decide": "success", "macos": macos,
+                "macos-pr": "success" if upstream else "skipped",
+                "browsers": "skipped",
+                "linux": "success" if upstream else "skipped",
+                "windows": "success" if upstream else "skipped",
+            }
+            env = {
+                **os.environ, "GITHUB_REPOSITORY": repo, "GITHUB_STEP_SUMMARY": os.devnull,
+                "RUN": "true", "DECIDE": "success",
+                "EVENT": "pull_request" if lanes == "quick" else "push",
+                "LANES_SIZE": lanes, "LAB_REQUIRED": str(required).lower(),
+                "LANES": json.dumps({job: {"result": result} for job, result in jobs.items()}),
+            }
+            done = subprocess.run(["bash", "-c", step], env=env, capture_output=True, text=True)
+            self.assertEqual(done.returncode, expected, done.stdout + done.stderr)
         self.assertIn("needs.decide.outputs.lanes != 'quick'", job(GATE, "browsers"))
-        self.assertIn('(.key != "browsers" or .value.result != "skipped" or (env.LANES_SIZE != "quick" and env.LANES_SIZE != "queue"))', job(GATE, "result"))
-        self.assertIn('(.key != "macos" or .value.result != "skipped" or (env.EVENT != "pull_request" and env.LANES_SIZE != "queue"))', job(GATE, "result"))
 
-    def test_full_macos_lane_runs_on_push_and_is_not_quick(self):
+    def test_macos_uses_the_lab_for_same_repo_fork_pull_requests(self):
         macos = job(GATE, "macos")
         self.assertIn("github.event_name != 'pull_request'", macos)
-        # Not the quick lane: the only `quick` here is the shared stage's scope decision.
-        self.assertNotIn("quick", macos.replace("needs.quick.outputs.skip", "").replace("needs: [quick, ", "needs: ["))
+        self.assertIn("github.event.pull_request.head.repo.full_name == github.repository", macos)
+        self.assertIn("quick: ${{ github.repository == 'Flip-Engineering/cua' && needs.decide.outputs.lanes == 'quick' }}", macos)
+        self.assertIn("github.repository == 'trycua/cua'", job(GATE, "macos-pr"))
 
     def test_windows_lanes_take_a_comma_list(self):
         text = (WF / "e2e-rust-windows.yml").read_text()
         for lane in ("shared", "native", "capture", "installer"):
-            self.assertIn(f"if: inputs.lane == 'all' || contains(format(',{{0}},', inputs.lane), ',{lane},')", text)
-        self.assertIn("if: success() && inputs.lane == 'all'", text)
+            self.assertEqual(job_condition(text, lane), f"inputs.lane == 'all' || contains(format(',{{0}},', inputs.lane), ',{lane},')")
+        self.assertEqual(job_condition(text, "certify"), "success() && inputs.lane == 'all'")
 
     def test_failures_after_merge_open_the_tracking_issue(self):
         report = job(GATE, "nightly-report")

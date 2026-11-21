@@ -23,12 +23,19 @@ concurrency:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   harness:
     needs: quick
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Harness tests (no GUI, no model)
     runs-on: macos-26
     timeout-minutes: 20
@@ -61,7 +68,11 @@ jobs:
 
   linux-desktop:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Linux headless desktop contracts (no model)
     runs-on: ubuntu-latest
     # The tests take ~2.5 min. The budget is for apt: the Azure Ubuntu mirror
@@ -101,7 +112,12 @@ jobs:
 
   windows-desktop:
     needs: quick
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Windows desktop contracts (no model)
     runs-on: windows-latest
     timeout-minutes: 20
@@ -120,7 +136,12 @@ jobs:
 
   taskpack:
     needs: quick
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Task pack tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -169,7 +190,12 @@ jobs:
 
   lint:
     needs: quick
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Python lint and format
     runs-on: ubuntu-latest
     timeout-minutes: 10

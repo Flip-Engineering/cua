@@ -12,7 +12,10 @@ permissions:
 
 jobs:
   title:
-    runs-on: ubuntu-latest
+    if: ${{ (github.repository == 'trycua/cua' || github.repository == 'Flip-Engineering/cua') }}
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     steps:
       - name: Require a conventional title
         env:

@@ -55,6 +55,7 @@ env:
 
 jobs:
   promote:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: promote ${{ matrix.component }}
     runs-on: ubuntu-latest
     timeout-minutes: 30

@@ -52,6 +52,7 @@ env:
 
 jobs:
   electron-native:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Electron native (${{ matrix.label }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180

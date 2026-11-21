@@ -83,12 +83,19 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   changes:
     needs: quick
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: "contract clients / changes"
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -157,7 +164,14 @@ jobs:
   mcp-client-discovery:
     name: MCP discovery in pinned clients (${{ matrix.os }})
     needs: [quick, changes]
-    if: ${{ !failure() && !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.run == 'true' && needs.changes.outputs.legs_discovery != '[]') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.changes.result == 'success'
+      && (needs.changes.outputs.run == 'true'
+      && needs.changes.outputs.legs_discovery != '[]')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -218,7 +232,14 @@ jobs:
   runtime-parity:
     name: Portable contract parity (${{ matrix.os }})
     needs: [quick, changes]
-    if: ${{ !failure() && !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.run == 'true' && needs.changes.outputs.legs_parity != '[]') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.changes.result == 'success'
+      && (needs.changes.outputs.run == 'true'
+      && needs.changes.outputs.legs_parity != '[]')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -300,7 +321,15 @@ jobs:
   verify:
     name: Generated contract and SDK bindings
     needs: [quick, changes]
-    if: ${{ !failure() && !cancelled() && needs.changes.result == 'success' && (needs.changes.outputs.run == 'true' && contains(needs.changes.outputs.matrix, 'ubuntu') && !contains(fromJSON(needs.changes.outputs.reused), 'Generated contract and SDK bindings')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.changes.result == 'success'
+      && (needs.changes.outputs.run == 'true'
+      && contains(needs.changes.outputs.matrix, 'ubuntu')
+      && !contains(fromJSON(needs.changes.outputs.reused), 'Generated contract and SDK bindings'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -509,7 +538,7 @@ jobs:
   # require if branch protection ever needs one.
   result:
     name: "contract clients / result"
-    if: ${{ always() && needs.quick.outputs.skip != 'true' }}
+    if: ${{ (always() && needs.quick.outputs.skip != 'true') && github.repository == 'trycua/cua' }}
     needs: [quick, changes, mcp-client-discovery, runtime-parity, verify]
     runs-on: ubuntu-latest
     timeout-minutes: 5

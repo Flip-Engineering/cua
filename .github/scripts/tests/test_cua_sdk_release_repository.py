@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from tests.workflow_conditions import upstream_condition
+
 import pytest
 import yaml
 
@@ -101,10 +103,10 @@ def test_spaces_signing_fails_closed_only_on_trycua_cua() -> None:
 def test_spaces_releases_macos_only_for_now() -> None:
     jobs = workflow("cd-cua-spaces.yml")["jobs"]
     # The Tauri Linux/Windows job is kept but off unless explicitly enabled.
-    assert jobs["build-linux-windows"]["if"] == "vars.CUA_SPACES_LINUX_WINDOWS == 'true'"
+    assert upstream_condition(jobs["build-linux-windows"]["if"]) == "vars.CUA_SPACES_LINUX_WINDOWS == 'true'"
     # The SwiftUI app builds on every release; only an Electron dry run skips it.
     # A release without macOS (a Windows or Linux patch) skips it too.
-    assert jobs["build-macos"]["if"] == (
+    assert upstream_condition(jobs["build-macos"]["if"]) == (
         "(github.event_name != 'workflow_dispatch' || !inputs.electron_dry_run) "
         "&& needs.electron-plan.outputs.macos == 'true'"
     )
@@ -136,13 +138,13 @@ def test_spaces_electron_builds_only_for_prereleases_and_dry_runs() -> None:
     plan = step("cd-cua-spaces.yml", "electron-plan", "Plan")["run"]
     assert 'beta=false; [[ "$VERSION" == *-* ]] && beta=true' in plan
     assert '[ "$DRY_RUN" != true ]' in plan and "refs/tags/cua-spaces-v*" in plan
-    assert jobs["electron-mac"]["if"] == "needs.electron-plan.outputs.build == 'true'"
+    assert upstream_condition(jobs["electron-mac"]["if"]) == "needs.electron-plan.outputs.build == 'true'"
     # Windows and Linux build for every release tag, stable included.
     # (a partial release builds only the platforms it changed).
-    assert jobs["electron-native"]["if"] == "needs.electron-plan.outputs.desktop == 'true'"
+    assert upstream_condition(jobs["electron-native"]["if"]) == "needs.electron-plan.outputs.desktop == 'true'"
     for name, platform in (("electron-windows", "windows"), ("electron-linux", "linux")):
         want = f"needs.electron-plan.outputs.desktop == 'true' && needs.electron-plan.outputs.{platform} == 'true'"
-        assert jobs[name]["if"] == want, name
+        assert upstream_condition(jobs[name]["if"]) == want, name
     publish_gate = jobs["electron-publish"]["if"]
     assert "needs.electron-plan.outputs.publish_electron == 'true'" in publish_gate
     assert "(needs.electron-plan.outputs.windows != 'true' || needs.electron-windows.result == 'success')" in publish_gate

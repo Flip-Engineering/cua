@@ -37,6 +37,7 @@ concurrency:
 
 jobs:
   crash-subset:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: crash campaign (fast subset)
     runs-on: ubuntu-latest
     timeout-minutes: 15

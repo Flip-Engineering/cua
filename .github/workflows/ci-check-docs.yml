@@ -58,12 +58,18 @@ jobs:
   # decide to skip.
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   scope:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Select affected generators
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -128,7 +134,13 @@ jobs:
   native-reference:
     name: Reference / ${{ matrix.library }} / ${{ matrix.platform }}
     needs: [quick, scope]
-    if: ${{ !failure() && !cancelled() && needs.scope.result == 'success' && (needs.scope.outputs.selected == 'true') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.scope.result == 'success'
+      && (needs.scope.outputs.selected == 'true')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.scope.outputs.matrix) }}
@@ -252,7 +264,7 @@ jobs:
 
   check-docs-sync:
     name: Check Documentation Sync
-    if: ${{ always() && needs.quick.outputs.skip != 'true' }}
+    if: ${{ (always() && needs.quick.outputs.skip != 'true') && github.repository == 'trycua/cua' }}
     needs: [quick, scope, native-reference]
     runs-on: ubuntu-latest
     timeout-minutes: 5

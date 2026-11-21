@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   publish:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Publish the installer and uninstaller scripts to cua-install-latest
     runs-on: ubuntu-latest
     steps:
@@ -57,7 +58,10 @@ jobs:
     name: Copy to the downloads CDN
     needs: [publish]
     if: >-
-      !cancelled() && github.repository == 'trycua/cua' && needs.publish.result == 'success'
+      ${{ (!cancelled()
+      && github.repository == 'trycua/cua'
+      && needs.publish.result == 'success')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 90

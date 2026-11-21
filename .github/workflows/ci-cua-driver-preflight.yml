@@ -53,7 +53,7 @@ concurrency:
 
 jobs:
   linux:
-    if: ${{ !startsWith(github.head_ref, 'release-please--branches--') }}
+    if: ${{ (!startsWith(github.head_ref, 'release-please--branches--')) && github.repository == 'trycua/cua' }}
     # The readiness checks run inside a real desktop sandbox (the canonical
     # ghcr.io/trycua/linux:24.04, locally on the runner) against the
     # cua-driver built from this commit, injected over whatever the image
@@ -97,7 +97,7 @@ jobs:
               bash /tmp/preflight-rust-e2e.sh"
 
   windows:
-    if: ${{ !startsWith(github.head_ref, 'release-please--branches--') }}
+    if: ${{ (!startsWith(github.head_ref, 'release-please--branches--')) && github.repository == 'trycua/cua' }}
     name: "Windows / lightweight desktop readiness"
     runs-on: windows-latest
     timeout-minutes: 15
@@ -117,7 +117,7 @@ jobs:
   report:
     name: open or update the issue
     needs: [linux, windows]
-    if: ${{ failure() && github.event_name != 'pull_request' }}
+    if: ${{ (failure() && github.event_name != 'pull_request') && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

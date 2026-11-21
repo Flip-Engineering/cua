@@ -27,6 +27,7 @@ concurrency:
 
 jobs:
   pin-is-current:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Cua Spaces bundles the latest Cua Driver
     runs-on: ubuntu-latest
     timeout-minutes: 5

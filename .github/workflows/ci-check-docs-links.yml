@@ -48,6 +48,7 @@ concurrency:
 
 jobs:
   check-code-blocks:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Check docs code-block dispositions
     runs-on: ubuntu-latest
     steps:
@@ -84,6 +85,7 @@ jobs:
           python3 tests/e2e/cua-sdk/docs/config_lane.py
 
   check-internal-links:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Check Internal Links (next-validate-link)
     runs-on: ubuntu-latest
     steps:
@@ -147,6 +149,7 @@ jobs:
           echo "╚══════════════════════════════════════════════════════════════════╝"
 
   check-external-links:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Check External Links (lychee)
     runs-on: ubuntu-latest
     steps:

@@ -21,6 +21,7 @@ env:
 
 jobs:
   warm:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Dispatch stale seeders
     runs-on: ubuntu-latest
     timeout-minutes: 10

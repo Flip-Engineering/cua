@@ -37,6 +37,7 @@ env:
 
 jobs:
   lane:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: doctor on ${{ matrix.provider }}
     # Built on the release of the image the binaries run in
     # (ghcr.io/trycua/linux:24.04, glibc 2.39): an ubuntu-26.04 build needs
@@ -147,7 +148,7 @@ jobs:
   publish:
     name: regenerate the support matrix
     needs: lane
-    if: always()
+    if: ${{ (always()) && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

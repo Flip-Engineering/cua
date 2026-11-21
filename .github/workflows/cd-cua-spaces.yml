@@ -274,6 +274,7 @@ jobs:
   # repository variable ALLOW_SPACES_BETA is `true`
   # (docs/contributing/releasing-cua-spaces.md). Every other job needs it.
   refuse-beta:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Refuse beta versions
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -342,6 +343,7 @@ jobs:
   # access" downloads that release: refuse to build an app whose pinned
   # cua-spacesd is not published (Cua Spaces 0.3.0 pinned a draft).
   spacesd-published:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: cua-spacesd pin is published
     needs: refuse-beta
     runs-on: ubuntu-latest
@@ -372,8 +374,9 @@ jobs:
     name: SwiftUI Rust (${{ matrix.arch }})
     needs: [spacesd-published, electron-plan]
     if: >-
-      (github.event_name != 'workflow_dispatch' || !inputs.electron_dry_run)
-      && needs.electron-plan.outputs.macos == 'true'
+      ${{ ((github.event_name != 'workflow_dispatch' || !inputs.electron_dry_run)
+      && needs.electron-plan.outputs.macos == 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: macos-26
     timeout-minutes: 180
     defaults:
@@ -425,8 +428,9 @@ jobs:
     # An Electron dry run builds only the Electron app; a release without
     # macOS (a Windows or Linux patch) skips the SwiftUI app.
     if: >-
-      (github.event_name != 'workflow_dispatch' || !inputs.electron_dry_run)
-      && needs.electron-plan.outputs.macos == 'true'
+      ${{ ((github.event_name != 'workflow_dispatch' || !inputs.electron_dry_run)
+      && needs.electron-plan.outputs.macos == 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: macos-26
     timeout-minutes: 180
     defaults:
@@ -812,7 +816,7 @@ jobs:
   build-linux-windows:
     name: ${{ matrix.name }}
     needs: build-macos
-    if: vars.CUA_SPACES_LINUX_WINDOWS == 'true'
+    if: ${{ (vars.CUA_SPACES_LINUX_WINDOWS == 'true') && github.repository == 'trycua/cua' }}
     # Holds the Azure Artifact Signing identity (Windows Authenticode).
     environment: cua-driver-release-signing
     permissions:
@@ -1041,6 +1045,7 @@ jobs:
   # Electron (see the header): only for a prerelease version, or a manual
   # dry run. Stable releases skip every electron-* job.
   electron-plan:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Electron plan
     needs: spacesd-published
     runs-on: ubuntu-latest
@@ -1196,6 +1201,7 @@ jobs:
   # The web UI (the app core compiled to wasm, and the Vite build), built once
   # for every job that bundles it: the SwiftUI app, the Electron apps.
   electron-web:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Web UI
     needs: refuse-beta
     runs-on: ubuntu-22.04
@@ -1270,7 +1276,7 @@ jobs:
   electron-native:
     name: Electron native (${{ matrix.label }})
     needs: electron-plan
-    if: needs.electron-plan.outputs.desktop == 'true'
+    if: ${{ (needs.electron-plan.outputs.desktop == 'true') && github.repository == 'trycua/cua' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 240
     strategy:
@@ -1303,7 +1309,7 @@ jobs:
   electron-native-mac:
     name: Electron native (${{ matrix.label }})
     needs: electron-plan
-    if: needs.electron-plan.outputs.build == 'true'
+    if: ${{ (needs.electron-plan.outputs.build == 'true') && github.repository == 'trycua/cua' }}
     runs-on: macos-26
     timeout-minutes: 180
     strategy:
@@ -1343,7 +1349,7 @@ jobs:
   electron-mac:
     name: Electron darwin (arm64, universal)
     needs: [electron-plan, electron-native-mac, electron-web]
-    if: needs.electron-plan.outputs.build == 'true'
+    if: ${{ (needs.electron-plan.outputs.build == 'true') && github.repository == 'trycua/cua' }}
     runs-on: macos-26
     timeout-minutes: 180
     defaults:
@@ -1614,7 +1620,10 @@ jobs:
   electron-windows-pkg:
     name: Electron windows (${{ matrix.arch }})
     needs: [electron-plan, electron-native, electron-web]
-    if: needs.electron-plan.outputs.desktop == 'true' && needs.electron-plan.outputs.windows == 'true'
+    if: >-
+      ${{ (needs.electron-plan.outputs.desktop == 'true'
+      && needs.electron-plan.outputs.windows == 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: windows-latest
     timeout-minutes: 120
     strategy:
@@ -1773,7 +1782,10 @@ jobs:
   electron-windows:
     name: Electron windows (x64, arm64)
     needs: [electron-plan, electron-windows-pkg]
-    if: needs.electron-plan.outputs.desktop == 'true' && needs.electron-plan.outputs.windows == 'true'
+    if: >-
+      ${{ (needs.electron-plan.outputs.desktop == 'true'
+      && needs.electron-plan.outputs.windows == 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -1827,7 +1839,10 @@ jobs:
   electron-linux-pkg:
     name: Electron linux (${{ matrix.arch }})
     needs: [electron-plan, electron-native, electron-web]
-    if: needs.electron-plan.outputs.desktop == 'true' && needs.electron-plan.outputs.linux == 'true'
+    if: >-
+      ${{ (needs.electron-plan.outputs.desktop == 'true'
+      && needs.electron-plan.outputs.linux == 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-22.04
     timeout-minutes: 120
     strategy:
@@ -1909,7 +1924,10 @@ jobs:
   electron-linux:
     name: Electron linux (x64, arm64)
     needs: [electron-plan, electron-linux-pkg]
-    if: needs.electron-plan.outputs.desktop == 'true' && needs.electron-plan.outputs.linux == 'true'
+    if: >-
+      ${{ (needs.electron-plan.outputs.desktop == 'true'
+      && needs.electron-plan.outputs.linux == 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -1931,10 +1949,12 @@ jobs:
     # electron-windows or electron-linux in a patch release without that
     # platform; the platforms that are planned must have succeeded.
     if: >-
-      !cancelled() && needs.electron-plan.outputs.publish_electron == 'true'
+      ${{ (!cancelled()
+      && needs.electron-plan.outputs.publish_electron == 'true'
       && (needs.electron-plan.outputs.windows != 'true' || needs.electron-windows.result == 'success')
       && (needs.electron-plan.outputs.linux != 'true' || needs.electron-linux.result == 'success')
-      && (needs.electron-mac.result == 'success' || needs.electron-mac.result == 'skipped')
+      && (needs.electron-mac.result == 'success' || needs.electron-mac.result == 'skipped'))
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -2047,7 +2067,10 @@ jobs:
   request-staging-smoke:
     name: Request the staging smoke
     needs: refuse-beta
-    if: (startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch' && inputs.rebuild_tag != ''))
+    if: >-
+      ${{ ((startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch'
+      && inputs.rebuild_tag != '')))
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 5
     defaults:
@@ -2082,7 +2105,11 @@ jobs:
   promote-check:
     name: Promote check (report only)
     needs: refuse-beta
-    if: (startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch' && inputs.rebuild_tag != '')) && vars.CUA_SPACES_PROMOTE_CHECK == 'true'
+    if: >-
+      ${{ ((startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch'
+      && inputs.rebuild_tag != ''))
+      && vars.CUA_SPACES_PROMOTE_CHECK == 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     continue-on-error: true
@@ -2134,7 +2161,10 @@ jobs:
   staging-gate:
     name: Staging smoke is green
     needs: refuse-beta
-    if: (startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch' && inputs.rebuild_tag != ''))
+    if: >-
+      ${{ ((startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch'
+      && inputs.rebuild_tag != '')))
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     # Waits up to 2 hours for the smoke that request-staging-smoke starts:
     # the smoke can sit in trycua/cloud's queue for half an hour before it
@@ -2163,11 +2193,13 @@ jobs:
     # Each platform that is in this release must have built (build-macos is
     # skipped, not failed, when a patch release has no macOS).
     if: >-
-      !cancelled() && needs.electron-plan.result == 'success'
+      ${{ (!cancelled()
+      && needs.electron-plan.result == 'success'
       && (needs.electron-plan.outputs.macos != 'true' || needs.build-macos.result == 'success')
       && (needs.electron-plan.outputs.windows != 'true' || needs.electron-windows.result == 'success')
       && (needs.electron-plan.outputs.build != 'true' || needs.electron-mac.result == 'success')
-      && (needs.electron-plan.outputs.publish_electron != 'true' || needs.electron-publish.result == 'success')
+      && (needs.electron-plan.outputs.publish_electron != 'true' || needs.electron-publish.result == 'success'))
+      && github.repository == 'trycua/cua' }}
     runs-on: macos-26
     timeout-minutes: 60
     defaults:
@@ -2308,12 +2340,15 @@ jobs:
     # Nothing is published unless verify-release passed.
     # build-macos is skipped (not failed) in a patch release without macOS.
     if: >-
-      !cancelled() && (startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch' && inputs.rebuild_tag != ''))
+      ${{ (!cancelled()
+      && (startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch'
+      && inputs.rebuild_tag != ''))
       && (needs.electron-plan.outputs.macos != 'true' || needs.build-macos.result == 'success')
       && needs.verify-release.result == 'success'
       && needs.staging-gate.result == 'success'
       && (needs.build-linux-windows.result == 'success' || needs.build-linux-windows.result == 'skipped')
-      && (needs.electron-plan.outputs.publish_electron != 'true' || needs.electron-publish.result == 'success')
+      && (needs.electron-plan.outputs.publish_electron != 'true' || needs.electron-publish.result == 'success'))
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -2620,10 +2655,13 @@ jobs:
     name: cua.ai serves the new release
     needs: [installer-manifest, electron-plan]
     if: >-
-      !cancelled() && needs.installer-manifest.result == 'success'
-      && (startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch' && inputs.rebuild_tag != ''))
+      ${{ (!cancelled()
+      && needs.installer-manifest.result == 'success'
+      && (startsWith(github.ref, 'refs/tags/cua-spaces-v') || (github.event_name == 'workflow_dispatch'
+      && inputs.rebuild_tag != ''))
       && github.repository == 'trycua/cua'
-      && needs.electron-plan.outputs.prerelease != 'true'
+      && needs.electron-plan.outputs.prerelease != 'true')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     timeout-minutes: 50
     permissions:
@@ -2675,7 +2713,10 @@ jobs:
     name: Copy to the downloads CDN
     needs: [installer-manifest, electron-plan]
     if: >-
-      !cancelled() && github.repository == 'trycua/cua' && needs.installer-manifest.result == 'success'
+      ${{ (!cancelled()
+      && github.repository == 'trycua/cua'
+      && needs.installer-manifest.result == 'success')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 90

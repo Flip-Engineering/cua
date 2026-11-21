@@ -23,12 +23,18 @@ concurrency:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   test:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Lint, test, and train smoke (Python ${{ matrix.python-version }})
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -162,7 +168,11 @@ jobs:
 
   macos-unit:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     # Apple silicon is the primary local inference platform for Cua-S1-4B
     # (S1_DEVICE=mps). This job covers the offline unit suite and the four-b
     # dependency resolution on macOS arm64; it does not download weights.

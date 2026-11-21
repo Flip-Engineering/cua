@@ -12,7 +12,7 @@ permissions:
 
 jobs:
   installer-compatibility:
-    if: github.event_name != 'merge_group'
+    if: ${{ (github.event_name != 'merge_group') && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-cua-driver-installer-compat.yml
     permissions:
       contents: read
@@ -20,10 +20,18 @@ jobs:
 
   validate:
     needs: installer-compatibility
-    if: always() && github.event_name != 'merge_group'
-    runs-on: ubuntu-latest
+    if: >-
+      ${{ (always()
+      && github.event_name != 'merge_group')
+      && (github.repository == 'trycua/cua' || (github.repository == 'Flip-Engineering/cua'
+      && (github.event_name == 'pull_request'
+      && github.event.pull_request.head.repo.full_name == github.repository))) }}
+    runs-on: >-
+      ${{ github.repository == 'Flip-Engineering/cua' && fromJSON('["self-hosted","Linux","X64","baton2-native-linux-x64"]')
+        || 'ubuntu-latest' }}
     steps:
       - name: Require successful installer certification
+        if: github.repository == 'trycua/cua'
         env:
           INSTALLER_CERTIFICATION_RESULT: ${{ needs.installer-compatibility.result }}
         run: |

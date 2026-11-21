@@ -31,6 +31,7 @@ env:
 
 jobs:
   plan:
+    if: ${{ github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/nightly-component-plan.yml
     with:
       component: lume
@@ -39,7 +40,7 @@ jobs:
 
   build:
     needs: plan
-    if: needs.plan.outputs.should_build == 'true'
+    if: ${{ (needs.plan.outputs.should_build == 'true') && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/cd-swift-lume.yml
     with:
       version: ${{ needs.plan.outputs.version }}
@@ -50,7 +51,10 @@ jobs:
 
   publish:
     needs: [plan, build]
-    if: needs.plan.outputs.should_build == 'true' && needs.build.result == 'success'
+    if: >-
+      ${{ (needs.plan.outputs.should_build == 'true'
+      && needs.build.result == 'success')
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -25,6 +25,7 @@ concurrency:
 
 jobs:
   image-refs:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Docs image refs have passing doctor reports
     runs-on: ubuntu-latest
     timeout-minutes: 15

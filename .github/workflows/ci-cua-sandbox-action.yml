@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   lint:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: shellcheck and docs actionlint
     runs-on: ubuntu-latest
     timeout-minutes: 5

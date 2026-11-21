@@ -32,6 +32,7 @@ concurrency:
 
 jobs:
   postgres-and-kms:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: Postgres registry, KMS build
     runs-on: ubuntu-latest
     timeout-minutes: 45
@@ -68,6 +69,7 @@ jobs:
         run: cargo clippy --locked -p cua-oidc --all-targets --features kms -- -D warnings
 
   image:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: image builds and serves
     runs-on: ubuntu-latest
     timeout-minutes: 60

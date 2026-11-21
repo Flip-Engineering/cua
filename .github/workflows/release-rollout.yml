@@ -57,6 +57,7 @@ concurrency:
 
 jobs:
   rollout:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: "Rollout ${{ inputs.stage }} (${{ inputs.channel }}, ${{ inputs.platform }}${{ inputs.dry_run && ', dry run' || '' }})"
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -137,7 +138,11 @@ jobs:
     name: Copy to the downloads CDN
     needs: [rollout]
     if: >-
-      !cancelled() && github.repository == 'trycua/cua' && needs.rollout.result == 'success' && !inputs.dry_run
+      ${{ (!cancelled()
+      && github.repository == 'trycua/cua'
+      && needs.rollout.result == 'success'
+      && !inputs.dry_run)
+      && github.repository == 'trycua/cua' }}
     runs-on: ubuntu-latest
     continue-on-error: true
     timeout-minutes: 90

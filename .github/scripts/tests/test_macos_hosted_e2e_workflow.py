@@ -10,6 +10,8 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from tests.workflow_conditions import job_condition
+
 import pytest
 
 
@@ -217,9 +219,10 @@ def test_hosted_macos_probe_is_manual_exact_sha_and_least_privilege() -> None:
     assert "authorized-live-jev-macos-evidence.yml" not in workflow
     assert "secrets: inherit" not in workflow
     # A called workflow has no mode input; hosted jobs run unless lume is chosen.
-    assert workflow.count("    if: inputs.mode != 'lume'\n") == 2
-    assert "    if: ${{ always() && inputs.mode != 'lume' }}\n" in workflow
-    assert "    if: inputs.mode == 'lume'\n" in workflow
+    assert job_condition(workflow, "probe") == "inputs.mode != 'lume'"
+    assert job_condition(workflow, "matrix") == "inputs.mode != 'lume'"
+    assert job_condition(workflow, "certify") == "always() && inputs.mode != 'lume'"
+    assert job_condition(workflow, "register-lume") == "inputs.mode == 'lume'"
     # Manual dispatches never queue into (and replace) a release-gate call.
     assert (
         "group: e2e-rust-macos-hosted-${{ github.event_name }}-${{ inputs.source_sha }}"

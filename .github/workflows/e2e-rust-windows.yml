@@ -73,6 +73,7 @@ concurrency:
 
 jobs:
   source:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: "Resolve exact source"
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -94,7 +95,9 @@ jobs:
           echo "sha=${sha,,}" >> "$GITHUB_OUTPUT"
 
   shared:
-    if: inputs.lane == 'all' || contains(format(',{0},', inputs.lane), ',shared,')
+    if: >-
+      ${{ (inputs.lane == 'all' || contains(format(',{0},', inputs.lane), ',shared,'))
+      && github.repository == 'trycua/cua' }}
     name: "Windows / shared Electron + Tauri"
     needs: source
     runs-on: ${{ inputs.runner }}
@@ -141,7 +144,9 @@ jobs:
           retention-days: 14
 
   native:
-    if: inputs.lane == 'all' || contains(format(',{0},', inputs.lane), ',native,')
+    if: >-
+      ${{ (inputs.lane == 'all' || contains(format(',{0},', inputs.lane), ',native,'))
+      && github.repository == 'trycua/cua' }}
     name: "Windows / native WPF + WinUI3 + WebView2"
     needs: source
     runs-on: ${{ inputs.runner }}
@@ -186,7 +191,9 @@ jobs:
           retention-days: 14
 
   capture:
-    if: inputs.lane == 'all' || contains(format(',{0},', inputs.lane), ',capture,')
+    if: >-
+      ${{ (inputs.lane == 'all' || contains(format(',{0},', inputs.lane), ',capture,'))
+      && github.repository == 'trycua/cua' }}
     name: "Windows / capture and desktop scope"
     needs: source
     runs-on: ${{ inputs.runner }}
@@ -231,7 +238,9 @@ jobs:
           retention-days: 14
 
   installer:
-    if: inputs.lane == 'all' || contains(format(',{0},', inputs.lane), ',installer,')
+    if: >-
+      ${{ (inputs.lane == 'all' || contains(format(',{0},', inputs.lane), ',installer,'))
+      && github.repository == 'trycua/cua' }}
     name: "Windows / installer and update smoke"
     needs: source
     runs-on: windows-latest
@@ -360,7 +369,7 @@ jobs:
           retention-days: 14
 
   summary:
-    if: always()
+    if: ${{ (always()) && github.repository == 'trycua/cua' }}
     needs: [source, shared, native, capture, installer]
     name: "Windows / matrix summary"
     runs-on: ubuntu-latest
@@ -518,7 +527,7 @@ jobs:
     # replay: per scripts/ci/README.md that replay is not itself a source of
     # behavioral truth, only the GitHub-hosted preflighted-interactive lane is.
     # Manual dispatches and release-gate calls certify the same matrix.
-    if: success() && inputs.lane == 'all'
+    if: ${{ (success() && inputs.lane == 'all') && github.repository == 'trycua/cua' }}
     needs: [source, shared, native, capture, installer]
     name: "Windows / canonical certification"
     runs-on: ubuntu-latest

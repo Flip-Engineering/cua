@@ -28,6 +28,7 @@ concurrency:
 
 jobs:
   alert:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: label and comment on conflicting PRs
     runs-on: ubuntu-latest
     timeout-minutes: 10

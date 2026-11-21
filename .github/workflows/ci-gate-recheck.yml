@@ -138,10 +138,11 @@ jobs:
   recheck:
     name: recheck
     if: >-
-      (github.event_name == 'workflow_run'
-        && (github.event.workflow_run.event == 'pull_request')
-        && contains(fromJSON('["success","neutral","skipped"]'), github.event.workflow_run.conclusion))
-      || (github.event_name == 'status' && github.event.context == 'local-ci' && github.event.state == 'success')
+      ${{ github.repository == 'trycua/cua' &&
+          ((github.event_name == 'workflow_run' &&
+            github.event.workflow_run.event == 'pull_request' &&
+            contains(fromJSON('["success","neutral","skipped"]'), github.event.workflow_run.conclusion)) ||
+           (github.event_name == 'status' && github.event.context == 'local-ci' && github.event.state == 'success')) }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

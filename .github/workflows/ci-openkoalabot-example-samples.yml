@@ -60,12 +60,20 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   typescript:
     needs: [quick, changes]
-    if: ${{ !failure() && !cancelled() && needs.changes.outputs.typescript == 'true' && !startsWith(github.head_ref, 'release-please--branches--') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.changes.outputs.typescript == 'true'
+      && !startsWith(github.head_ref, 'release-please--branches--')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: openkoalabot-example-ts (npm test)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -118,7 +126,11 @@ jobs:
 
   changes:
     needs: quick
-    if: ${{ !failure() && !cancelled() && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: scope (macOS Swift sample)
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -159,7 +171,13 @@ jobs:
 
   swift:
     needs: [quick, changes]
-    if: ${{ !failure() && !cancelled() && needs.changes.outputs.run == 'true' && !startsWith(github.head_ref, 'release-please--branches--') && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.changes.outputs.run == 'true'
+      && !startsWith(github.head_ref, 'release-please--branches--')
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: openkoalabot-example-swift (swift test)
     runs-on: macos-26
     timeout-minutes: 60

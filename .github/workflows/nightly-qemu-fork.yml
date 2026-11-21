@@ -48,6 +48,7 @@ env:
 
 jobs:
   checker:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: perf guard unit tests
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -58,6 +59,7 @@ jobs:
       - run: python3 -m unittest discover -s libs/cua/bench/fork-fanout -p 'test_*.py' -v
 
   linux-kvm:
+    if: ${{ github.repository == 'trycua/cua' }}
     name: linux-kvm (${{ matrix.path }})
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -169,7 +171,10 @@ jobs:
 
   macos-hvf:
     name: macos-hvf (self-hosted)
-    if: vars.CUA_E2E_LUME_RUNNER != '' && github.event_name != 'pull_request'
+    if: >-
+      ${{ (vars.CUA_E2E_LUME_RUNNER != ''
+      && github.event_name != 'pull_request')
+      && github.repository == 'trycua/cua' }}
     runs-on: ["self-hosted", "macOS", "${{ vars.CUA_E2E_LUME_RUNNER }}"]
     timeout-minutes: 90
     steps:

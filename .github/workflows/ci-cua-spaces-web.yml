@@ -55,13 +55,20 @@ env:
 jobs:
   quick:
     name: quick
-    if: (github.event_name == 'pull_request' || github.event_name == 'merge_group')
+    if: >-
+      ${{ ((github.event_name == 'pull_request' || github.event_name == 'merge_group'))
+      && github.repository == 'trycua/cua' }}
     uses: ./.github/workflows/ci-quick.yml
 
   # The app core wasm is built once here; test and parity download it.
   core-wasm:
     needs: quick
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: build app core wasm
     runs-on: ubuntu-24.04
     steps:
@@ -96,7 +103,12 @@ jobs:
   # to the web app only, and four release builds failed on it.
   desktop-standalone:
     needs: [quick]
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: Electron shell typecheck and build (web app not installed)
     runs-on: ubuntu-24.04
     steps:
@@ -118,7 +130,12 @@ jobs:
 
   test:
     needs: [quick, core-wasm]
-    if: ${{ !failure() && !cancelled() && (!startsWith(github.head_ref, 'release-please--branches--')) && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && (!startsWith(github.head_ref, 'release-please--branches--'))
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     name: typecheck, tests, bridge contract, build
     runs-on: ubuntu-24.04
     env:
@@ -186,7 +203,13 @@ jobs:
   parity:
     name: parity flows (${{ matrix.host }})
     needs: [quick, test, core-wasm]
-    if: ${{ !failure() && !cancelled() && needs.test.result == 'success' && needs.core-wasm.result == 'success' && needs.quick.outputs.skip != 'true' }}
+    if: >-
+      ${{ (!failure()
+      && !cancelled()
+      && needs.test.result == 'success'
+      && needs.core-wasm.result == 'success'
+      && needs.quick.outputs.skip != 'true')
+      && github.repository == 'trycua/cua' }}
     env:
       CORE_WASM_PREBUILT: "1"
     strategy:

@@ -2,7 +2,7 @@ name: "E2E: Rust macOS hosted"
 
 on:
   # Stable Cua Driver tag runs call the hosted matrix as a release gate. A
-  # called workflow has no `mode` input, so the hosted jobs run unless a manual
+  # called workflow has no `mode` input, so the desktop jobs run unless a manual
   # dispatch selects `lume`. Under workflow_call, `github.sha` is the caller's
   # tag commit, so the caller passes that same SHA as `source_sha` and the
   # workflow-ref check below still proves the harness matches the source.
@@ -12,6 +12,11 @@ on:
         description: "Full 40-character commit SHA to certify"
         required: true
         type: string
+      quick:
+        description: "Run the shared Electron lane for a pull request"
+        required: false
+        type: boolean
+        default: false
       rebuild_of_released_source:
         description: "Rebuild dispatch: certify an already-tagged source SHA with the workflow from a newer ref"
         required: false
@@ -29,7 +34,7 @@ on:
         type: boolean
         default: false
       mode:
-        description: "Supplemental GitHub-hosted matrix or registration of a direct Lume console run"
+        description: "Desktop matrix or registration of a direct Lume console run"
         required: false
         type: choice
         default: hosted
@@ -69,8 +74,44 @@ env:
   DO_NOT_TRACK: "1"
 
 jobs:
+  lab:
+    name: Flip macOS lab desktop E2E
+    if: >-
+      github.repository == 'Flip-Engineering/cua' && inputs.mode != 'lume' &&
+      (github.event_name != 'pull_request' ||
+       github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: [self-hosted, macOS, X64, flip-macos-lab]
+    concurrency:
+      group: flip-macos-desktop-lab
+      cancel-in-progress: false
+    env:
+      CUA_E2E_SOURCE_SHA: ${{ inputs.source_sha }}
+      CUA_E2E_INTERNAL_LANE: ${{ inputs.quick && 'shared' || 'all' }}
+      CUA_E2E_HARNESS_FILTER: ${{ inputs.quick && 'electron' || '' }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+        with:
+          ref: ${{ inputs.source_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4716b85f2fac3e324e64fa2810f6b5c3905760a5 # 1.97.1
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+      - name: Run the native macOS desktop tests
+        shell: bash
+        run: bash scripts/ci/macos/run-lab-rust-e2e.sh
+      - name: Upload macOS lab evidence
+        if: always()
+        uses: actions/upload-artifact@65c4c4a1ddee5b72f698fdd19549f0f0fb45cf08 # v4.6.2
+        with:
+          name: rust-macos-flip-lab-${{ github.run_id }}-${{ github.run_attempt }}
+          path: artifacts/cua-driver/macos*
+          if-no-files-found: warn
+          compression-level: 0
+
   probe:
-    if: inputs.mode != 'lume'
+    if: ${{ (inputs.mode != 'lume') && github.repository == 'trycua/cua' }}
     name: hosted environment probe
     runs-on: macos-26
     timeout-minutes: 20
@@ -140,7 +181,7 @@ jobs:
           retention-days: 14
 
   matrix:
-    if: inputs.mode != 'lume'
+    if: ${{ (inputs.mode != 'lume') && github.repository == 'trycua/cua' }}
     needs: probe
     name: hosted ${{ matrix.lane }} lane
     runs-on: macos-26
@@ -239,7 +280,7 @@ jobs:
           retention-days: 14
 
   certify:
-    if: ${{ always() && inputs.mode != 'lume' }}
+    if: ${{ (always() && inputs.mode != 'lume') && github.repository == 'trycua/cua' }}
     needs: [probe, matrix]
     name: hosted certification result
     runs-on: ubuntu-latest
@@ -288,7 +329,7 @@ jobs:
           retention-days: 14
 
   register-lume:
-    if: inputs.mode == 'lume'
+    if: ${{ (inputs.mode == 'lume') && github.repository == 'trycua/cua' }}
     name: Register direct Lume certification
     runs-on: ubuntu-latest
     environment: authorized-live-jev-use-demo

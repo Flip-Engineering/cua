@@ -1,6 +1,8 @@
 """Static security contracts for the labeled candidate live review chain."""
 
 from pathlib import Path
+
+from tests.workflow_conditions import upstream_condition
 import re
 
 import yaml
@@ -145,8 +147,9 @@ def test_macos_direct_lume_registration_is_manual_and_not_pr_event_chained() -> 
     assert set(entry_triggers["workflow_call"]["inputs"]) == {
         "source_sha",
         "rebuild_of_released_source",
+        "quick",
     }
-    assert entry_workflow["jobs"]["register-lume"]["if"] == "inputs.mode == 'lume'"
+    assert upstream_condition(entry_workflow["jobs"]["register-lume"]["if"]) == "inputs.mode == 'lume'"
     callers = sorted(
         path.name
         for path in (ROOT / ".github/workflows").glob("*.yml")

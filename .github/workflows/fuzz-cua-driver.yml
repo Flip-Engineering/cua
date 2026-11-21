@@ -40,7 +40,7 @@ env:
 
 jobs:
   fuzz:
-    if: ${{ !startsWith(github.head_ref, 'release-please--branches--') }}
+    if: ${{ (!startsWith(github.head_ref, 'release-please--branches--')) && github.repository == 'trycua/cua' }}
     name: ${{ matrix.target }}
     runs-on: ubuntu-latest
     timeout-minutes: 45
