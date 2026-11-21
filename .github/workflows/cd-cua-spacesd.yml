@@ -502,7 +502,6 @@ jobs:
     needs: version
     name: cua-cli linux ${{ matrix.arch }}
     runs-on: [self-hosted, Linux, X64, docker-linux]
-    timeout-minutes: 120
     container:
       # Actions pulls before applying create options. Pin the ARM64 image
       # manifest because Docker resolves image indexes for the runner CPU.
