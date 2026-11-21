@@ -3,6 +3,7 @@
 # unknown label and the real errors get lost in the noise.
 self-hosted-runner:
   labels:
+    - baton2-native-linux-x64
     - flip-macos-lab
     - flip-windows-lab
     - lume

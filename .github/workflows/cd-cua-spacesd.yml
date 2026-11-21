@@ -75,7 +75,9 @@ env:
 
 jobs:
   version:
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -124,7 +126,9 @@ jobs:
   check-version:
     needs: version
     if: needs.version.outputs.publish == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -143,7 +147,9 @@ jobs:
   linux:
     needs: version
     name: linux ${{ matrix.arch }}
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     timeout-minutes: 90
     container:
       image: ${{ matrix.image }}
@@ -165,10 +171,20 @@ jobs:
       # runner mounts its own x64 Node executable into that container.
       - name: Make the Actions runtime available in the ARM64 container
         if: matrix.arch == 'aarch64'
+        env:
+          DEBIAN_FRONTEND: noninteractive
         run: |
           dpkg --add-architecture amd64
-          apt-get -o Acquire::Retries=5 update
-          apt-get -o Acquire::Retries=5 install -y --no-install-recommends libc6:amd64 libstdc++6:amd64
+          # Bullseye's live security archive still lists libc6, but its
+          # binary has moved to the signed Debian archive. This bootstrap
+          # runs before checkout, so the source build-deps script is absent.
+          rm -f /etc/apt/sources.list.d/debian.sources
+          cat > /etc/apt/sources.list <<'EOF'
+          deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://archive.debian.org/debian bullseye main
+          deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://archive.debian.org/debian-security bullseye-security main
+          EOF
+          apt-get -o Dir::Etc::sourceparts=- -o Acquire::Retries=5 update
+          apt-get -o Dir::Etc::sourceparts=- -o Acquire::Retries=5 install -y --no-install-recommends libc6:amd64 libstdc++6:amd64
       # debian:11 is bare. Without git, actions/checkout downloads the tree
       # through the REST API, which is all the build needs.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -615,7 +631,9 @@ jobs:
   release:
     needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows]
     if: needs.version.outputs.publish == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     permissions:
       contents: write
       # Keyless Sigstore signing of the release assets.
@@ -712,7 +730,9 @@ jobs:
     needs: [version, release]
     if: >-
       !cancelled() && github.repository == 'trycua/cua' && needs.release.result == 'success' && needs.version.outputs.publish == 'true'
-    runs-on: [self-hosted, Linux, X64]
+    runs-on:
+      group: baton2-native-homelab
+      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
     continue-on-error: true
     timeout-minutes: 90
     # The publish role trusts main and this environment (OIDC).
