@@ -187,10 +187,13 @@ jobs:
           PROFILE: ${{ matrix.profile }}
         run: |
           case "$TARGET" in
-            aarch64-unknown-linux-gnu) cargo zigbuild --target "$TARGET.2.31" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd ;;
-            aarch64-unknown-linux-musl) cargo zigbuild --target "$TARGET" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd ;;
-            *) cargo build --target "$TARGET" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd ;;
+            aarch64-unknown-linux-gnu) zig_target="$TARGET.2.31" ;;
+            aarch64-unknown-linux-musl) zig_target="$TARGET" ;;
+            *) exec cargo build --target "$TARGET" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd ;;
           esac
+          # Zig opens the link's object files together. Use the container's allowed limit.
+          ulimit -Sn "$(ulimit -Hn)"
+          cargo zigbuild --target "$zig_target" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd
       - name: Check glibc floor and static OpenSSL
         if: endsWith(matrix.target, '-gnu')
         working-directory: libs/cua-spacesd
@@ -514,6 +517,7 @@ jobs:
           TARGET: ${{ matrix.target }}
         run: |
           if [[ "$TARGET" == aarch64-unknown-linux-gnu ]]; then
+            ulimit -Sn "$(ulimit -Hn)"
             cargo zigbuild --target "$TARGET.2.31" --locked --release -p cua-spaces-cli --bin cua-spaces-cli
           else
             cargo build --target "$TARGET" --locked --release -p cua-spaces-cli --bin cua-spaces-cli
