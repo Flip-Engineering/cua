@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use cua_sandbox_core::{
     ConnectOptionsOverride, CreateOptions, Error, ForwardVia, InstanceStatus, LocalEndpoints,
     LocalInstance, LocalRuntime, LocalStartSpec, LocalSummary, PortTarget, Probe, ProviderKind,
-    RuntimeError, RuntimeResult, SandboxState, Sandboxes, Status,
+    Resize, RuntimeError, RuntimeResult, SandboxState, Sandboxes, Status,
 };
 use cua_spacesd_client::testing::{MockAuth, MockServer};
 use std::{
@@ -137,6 +137,10 @@ impl LocalRuntime for FakeRuntime {
             status: InstanceStatus::Running,
             endpoints: self.endpoints(),
         })
+    }
+
+    async fn resize(&self, name: &str, _: &Resize) -> RuntimeResult<LocalInstance> {
+        self.resume(name).await
     }
 
     async fn list(&self) -> RuntimeResult<Vec<LocalSummary>> {
@@ -397,6 +401,45 @@ async fn restart_waits_for_the_ready_probes() {
         "restart returned after {:?}, before the guest answered",
         t.elapsed()
     );
+}
+
+#[tokio::test]
+async fn restart_and_resize_wait_for_spacesd_with_the_create_setting() {
+    let dir = tempfile::tempdir().unwrap();
+    let rt = Arc::new(FakeRuntime::default());
+    let server = MockServer::start(MockAuth::default()).await;
+    rt.map(3211, server.addr.port());
+    *rt.image_spacesd.lock().unwrap() = Some(Some(true));
+    *rt.guest_listening.lock().unwrap() = Some(true);
+    let sbx = Sandboxes::builder()
+        .local(rt.clone())
+        .state_dir(dir.path())
+        .build();
+    let mut options = CreateOptions::new(ProviderKind::Local, "img")
+        .name("desktop")
+        .wait_for(Probe::Tcp(3211));
+    options.ready_timeout = Duration::from_secs(1);
+    options.ready_timeout_given = true;
+    sbx.create(options).await.unwrap();
+
+    // The gateway's TCP check succeeds, but Health still has to answer.
+    rt.map(3211, closed_port());
+    let resize = Resize {
+        disk_gb: Some(28),
+        ..Default::default()
+    };
+    for result in [
+        tokio::time::timeout(Duration::from_secs(5), sbx.restart("desktop")).await,
+        tokio::time::timeout(Duration::from_secs(5), sbx.resize("desktop", &resize)).await,
+    ] {
+        assert!(
+            matches!(result, Ok(Err(Error::Timeout(ref message))) if message.contains("cua-spacesd did not answer")),
+            "{result:?}"
+        );
+    }
+
+    rt.map(3211, server.addr.port());
+    sbx.resize("desktop", &resize).await.unwrap();
 }
 
 #[tokio::test]

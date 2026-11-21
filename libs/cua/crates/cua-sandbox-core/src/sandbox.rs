@@ -116,6 +116,11 @@ pub const STOP_WATCH_EVERY: Duration = Duration::from_secs(15);
 /// How long a local resume waits for the probes its create waited for.
 pub const RESUME_READY_TIMEOUT: Duration = Duration::from_secs(180);
 
+/// Default boot allowance when the caller does not set `ready_timeout`.
+pub const DEFAULT_BOOT_READY_TIMEOUT: Duration = Duration::from_secs(600);
+
+const BOOT_READINESS_KEY: &str = "boot_readiness";
+
 /// How long readiness waits for cua-spacesd to apply a token written into
 /// the guest (it follows its token file within about 50 ms).
 const TOKEN_APPLY_GRACE: Duration = Duration::from_secs(5);
@@ -383,7 +388,7 @@ impl CreateOptions {
             ports: vec![],
             services: BTreeMap::new(),
             wait_for: vec![],
-            ready_timeout: Duration::from_secs(600),
+            ready_timeout: DEFAULT_BOOT_READY_TIMEOUT,
             ready_timeout_given: false,
             env: BTreeMap::new(),
             command: None,
@@ -887,31 +892,14 @@ impl Sandboxes {
             }
         };
         let started_ms = started.elapsed().as_millis() as u64;
-        let clock = image_ready.unwrap_or(started);
-        if !options.wait_for.is_empty() {
-            report(Progress::phase(Phase::WaitingForServices));
-        }
-        let mut ready = sandbox
-            .wait_ready(
+        let ready = BootReadiness::from_create(&options, sandbox.declares_spacesd(&options))
+            .wait(
+                &sandbox,
                 &options.wait_for,
-                readiness_left(options.ready_timeout, clock),
+                image_ready.unwrap_or(started),
+                sandbox.restores_shared_memory(),
             )
             .await;
-        // The image declares cua-spacesd: ready includes it answering
-        // `Health` (bounded), so the first guest call does not race its
-        // start. Images that do not declare it are never waited on.
-        if ready.is_ok() && sandbox.declares_spacesd(&options) {
-            let remaining = readiness_left(options.ready_timeout, clock);
-            report(Progress::phase(Phase::WaitingForServices).detail("cua-spacesd"));
-            let budget = spacesd_budget(&options, remaining);
-            // A microVM may have been restored from a snapshot other Spaces
-            // share: its cua-spacesd regenerates what it holds in memory.
-            ready = if sandbox.restores_shared_memory() {
-                sandbox.wait_new_machine(budget).await
-            } else {
-                sandbox.wait_spacesd(budget).await
-            };
-        }
         if let Err(e) = ready {
             // A failed create deletes what it made, unless the caller keeps
             // it to debug.
@@ -1334,15 +1322,10 @@ impl Sandboxes {
                 &name,
                 &inst,
                 o,
-                &recorded_os(&o.os, image_info.as_ref()),
+                image_info.as_ref(),
                 &services,
                 env_token.as_deref(),
             )?;
-            if let Some(i) = &image_info {
-                let mut fields = Map::new();
-                fields.insert(IMAGE_INFO_KEY.into(), serde_json::to_value(i)?);
-                self.inner.state.update(&name, fields)?;
-            }
         }
         Ok(Sandbox {
             mgr: self.clone(),
@@ -1364,7 +1347,7 @@ impl Sandboxes {
         name: &str,
         inst: &LocalInstance,
         o: &CreateOptions,
-        os: &str,
+        image_info: Option<&ImageInfo>,
         services: &BTreeMap<String, u16>,
         env_token: Option<&str>,
     ) -> Result<()> {
@@ -1377,7 +1360,13 @@ impl Sandboxes {
             .unwrap_or(ENV_PORT);
         let mut extra = Map::new();
         extra.insert("services".into(), serde_json::to_value(services)?);
-        // What readiness meant, so a resume waits for it too.
+        if let Some(info) = image_info {
+            extra.insert(IMAGE_INFO_KEY.into(), serde_json::to_value(info)?);
+        }
+        // Keep the creation policy so the same checks and allowance apply
+        // when this guest next boots. Existing readers still use ready_probes.
+        let boot = BootReadiness::from_create(o, declares_spacesd(image_info, services, o));
+        extra.insert(BOOT_READINESS_KEY.into(), serde_json::to_value(boot)?);
         if !o.wait_for.is_empty() {
             extra.insert("ready_probes".into(), probes_to_json(&o.wait_for));
         }
@@ -1401,16 +1390,17 @@ impl Sandboxes {
                 .and_then(|a| a.rsplit(':').next())
                 .and_then(|p| p.parse::<u16>().ok())
         };
+        let os = recorded_os(&o.os, image_info);
         self.inner.state.save(&SandboxState::Local(LocalState {
             name: name.into(),
             runtime_type: backend.into(),
-            image: registry_image_dict(&o.image, os, Some("vm")),
+            image: registry_image_dict(&o.image, &os, Some("vm")),
             host: ep.host.clone(),
             api_port,
             exposed_ports: Some(ep.ports.iter().map(|(g, h)| (g.to_string(), *h)).collect()),
             vnc_port: port_of(&ep.vnc),
             qmp_port: port_of(&ep.qmp),
-            os_type: Some(os.to_string()),
+            os_type: Some(os),
             memory_mb: Some(o.memory_mb),
             cpu_count: Some(o.cpus),
             status: "running".into(),
@@ -2127,18 +2117,20 @@ impl Sandboxes {
         }
     }
 
-    /// Restarts by name (stop + resume locally).
+    /// Restarts a local sandbox and waits for the readiness configured at create.
     pub async fn restart(&self, name: &str) -> Result<()> {
         match self.kind_of(name)? {
             (ProviderKind::Local, _) => {
                 let rt = self.local()?;
                 rt.stop(name).await?;
-                let inst = rt.resume(name).await?;
+                let started = Instant::now();
+                let (inst, boot) =
+                    crate::progress::past(crate::progress::Phase::Pulling, rt.resume(name)).await;
+                let inst = inst?;
                 self.record_endpoints(name, &inst)?;
                 self.inner.state.set_status(name, "running")?;
-                // Restarted means answering, as a resume and a resize are
-                // waited for: a VM's resume returns while its guest boots.
-                self.wait_recorded_probes(name).await
+                self.wait_recorded_readiness(name, boot.unwrap_or(started))
+                    .await
             }
             (kind, _) => Err(Error::Unsupported {
                 provider: kind,
@@ -2148,13 +2140,20 @@ impl Sandboxes {
     }
 
     /// Gives the local sandbox `name` another shape (vCPUs, memory, a larger
-    /// disk): it stops and boots again from its own disk, and is waited for
-    /// as [`Self::resume`] waits. Its disk is kept; its memory and running
-    /// processes are not. Fleet and contrib sandboxes are refused.
+    /// disk): it stops and boots again from its own disk and waits for the
+    /// readiness configured at create. The disk persists across the reboot,
+    /// which discards memory and stops processes. Fleet and contrib
+    /// sandboxes are refused.
     pub async fn resize(&self, name: &str, shape: &cua_vmm::Resize) -> Result<()> {
         match self.kind_of(name)? {
             (ProviderKind::Local, _) => {
-                let inst = self.local()?.resize(name, shape).await?;
+                let started = Instant::now();
+                let (inst, boot) = crate::progress::past(
+                    crate::progress::Phase::Pulling,
+                    self.local()?.resize(name, shape),
+                )
+                .await;
+                let inst = inst?;
                 self.record_endpoints(name, &inst)?;
                 if let Some(SandboxState::Local(mut l)) = self.inner.state.load(name) {
                     if let Some(c) = shape.cpus {
@@ -2166,7 +2165,8 @@ impl Sandboxes {
                     self.inner.state.save(&SandboxState::Local(l))?;
                 }
                 self.inner.state.set_status(name, "running")?;
-                self.wait_recorded_probes(name).await
+                self.wait_recorded_readiness(name, boot.unwrap_or(started))
+                    .await
             }
             (kind, s) => Err(Error::Unsupported {
                 provider: kind,
@@ -2175,19 +2175,20 @@ impl Sandboxes {
         }
     }
 
-    /// Waits for the ready probes recorded with sandbox `name` (none: it
-    /// answers when its runtime says so).
-    async fn wait_recorded_probes(&self, name: &str) -> Result<()> {
-        let probes = self
-            .inner
-            .state
-            .load_raw(name)
-            .and_then(|m| m.get("ready_probes").cloned())
+    /// Waits using the sandbox's creation policy after its runtime boots it.
+    async fn wait_recorded_readiness(&self, name: &str, clock: Instant) -> Result<()> {
+        let Some(state) = self.inner.state.load_raw(name) else {
+            return Err(Error::NotFound(name.into()));
+        };
+        let probes = state
+            .get("ready_probes")
+            .cloned()
             .map(probes_from_json)
             .unwrap_or_default();
-        if !probes.is_empty() {
+        let boot = BootReadiness::from_state(&state, &probes);
+        if !probes.is_empty() || boot.spacesd {
             let sb = self.connect(name).await?;
-            sb.wait_ready(&probes, RESUME_READY_TIMEOUT).await?;
+            boot.wait(&sb, &probes, clock, false).await?;
         }
         Ok(())
     }
@@ -3086,10 +3087,7 @@ impl Sandbox {
     /// replaces the image's entrypoint (which may be what starts spacesd).
     /// A cua-spacesd the runtime injected serves any command.
     pub fn declares_spacesd(&self, options: &CreateOptions) -> bool {
-        self.image_info.as_ref().and_then(|i| i.spacesd) == Some(true)
-            && self.services.contains_key("env")
-            && (options.command.as_ref().is_none_or(|c| c.is_empty())
-                || self.image_info.as_ref().is_some_and(|i| i.injected))
+        declares_spacesd(self.image_info.as_ref(), &self.services, options)
     }
 
     /// Waits until the sandbox's cua-spacesd answers `SystemService.Health`
@@ -3927,16 +3925,101 @@ fn readiness_left(ready_timeout: Duration, clock: Instant) -> Duration {
     ready_timeout.saturating_sub(clock.elapsed())
 }
 
-/// How long create waits for cua-spacesd once the guest's ports answer,
-/// given `remaining` of the readiness budget: all of it when the caller
-/// chose the budget, else [`SPACESD_READY_TIMEOUT`] (never more than the
-/// whole budget) however much is left, so a slow boot does not leave the
-/// daemon no time to answer.
-fn spacesd_budget(options: &CreateOptions, remaining: Duration) -> Duration {
-    if options.ready_timeout_given {
-        remaining
-    } else {
-        SPACESD_READY_TIMEOUT.min(options.ready_timeout)
+fn declares_spacesd(
+    image: Option<&ImageInfo>,
+    services: &BTreeMap<String, u16>,
+    options: &CreateOptions,
+) -> bool {
+    image.is_some_and(|i| {
+        i.spacesd == Some(true)
+            && services.contains_key("env")
+            && (i.injected || options.command.as_ref().is_none_or(|c| c.is_empty()))
+    })
+}
+
+/// The creation-time `ready_timeout` setting is the allowance for every
+/// boot, counted once its image is present. A caller-set value also
+/// covers the daemon handshake. The default gives the daemon the normal
+/// connection allowance after the guest's ports answer.
+#[derive(serde::Deserialize, serde::Serialize)]
+struct BootReadiness {
+    timeout: Duration,
+    caller_timeout: bool,
+    spacesd: bool,
+}
+
+impl BootReadiness {
+    fn from_create(options: &CreateOptions, spacesd: bool) -> Self {
+        Self {
+            timeout: options.ready_timeout,
+            caller_timeout: options.ready_timeout_given,
+            spacesd,
+        }
+    }
+
+    fn from_state(state: &Map<String, Value>, probes: &[Probe]) -> Self {
+        if let Some(boot) = state
+            .get(BOOT_READINESS_KEY)
+            .and_then(|value| serde_json::from_value(value.clone()).ok())
+        {
+            return boot;
+        }
+        // Old records have no explicit policy. An injected daemon or a
+        // probe for a declared daemon's port establishes that this image's
+        // daemon was expected to run.
+        let env = state
+            .get("services")
+            .and_then(|services| services.get("env"))
+            .and_then(Value::as_u64);
+        let spacesd = image_info_of(state).is_some_and(|image| {
+            image.spacesd == Some(true)
+                && env.is_some()
+                && (image.injected
+                    || probes.iter().any(
+                        |probe| matches!(probe, Probe::Tcp(port) if Some(u64::from(*port)) == env),
+                    ))
+        });
+        Self {
+            timeout: DEFAULT_BOOT_READY_TIMEOUT,
+            caller_timeout: false,
+            spacesd,
+        }
+    }
+
+    fn spacesd_budget(&self, remaining: Duration) -> Duration {
+        if self.caller_timeout {
+            remaining
+        } else {
+            SPACESD_READY_TIMEOUT.min(self.timeout)
+        }
+    }
+
+    async fn wait(
+        &self,
+        sandbox: &Sandbox,
+        probes: &[Probe],
+        clock: Instant,
+        restored_shared_memory: bool,
+    ) -> Result<()> {
+        use crate::progress::{Phase, Progress, report};
+        if !probes.is_empty() {
+            report(Progress::phase(Phase::WaitingForServices));
+            sandbox
+                .wait_ready(probes, readiness_left(self.timeout, clock))
+                .await?;
+        }
+        if self.spacesd {
+            report(Progress::phase(Phase::WaitingForServices).detail("cua-spacesd"));
+            let budget = self.spacesd_budget(readiness_left(self.timeout, clock));
+            // After a shared snapshot restore the daemon must also have
+            // regenerated its in-memory identity.
+            if restored_shared_memory {
+                sandbox.wait_new_machine(budget).await?;
+            } else {
+                sandbox.wait_spacesd(budget).await?;
+            }
+        }
+        Ok(())
     }
 }
 
@@ -4158,22 +4241,34 @@ mod placement_tests {
     fn a_chosen_ready_timeout_governs_the_spacesd_wait() {
         let mut o = opts(ProviderKind::Local, "macos:26");
         let left = Duration::from_secs(500);
-        assert_eq!(spacesd_budget(&o, left), SPACESD_READY_TIMEOUT);
+        assert_eq!(
+            BootReadiness::from_create(&o, true).spacesd_budget(left),
+            SPACESD_READY_TIMEOUT
+        );
         o.ready_timeout = Duration::from_secs(900);
         o.ready_timeout_given = true;
-        assert_eq!(spacesd_budget(&o, left), left);
+        assert_eq!(
+            BootReadiness::from_create(&o, true).spacesd_budget(left),
+            left
+        );
     }
 
     #[test]
     fn the_default_spacesd_wait_is_never_cut_short_by_a_slow_boot() {
         let o = opts(ProviderKind::Local, "macos:26");
         for left in [Duration::ZERO, Duration::from_secs(30)] {
-            assert_eq!(spacesd_budget(&o, left), SPACESD_READY_TIMEOUT);
+            assert_eq!(
+                BootReadiness::from_create(&o, true).spacesd_budget(left),
+                SPACESD_READY_TIMEOUT
+            );
         }
         // A budget shorter than the spacesd wait still bounds it.
         let mut o = o;
         o.ready_timeout = Duration::from_secs(2);
-        assert_eq!(spacesd_budget(&o, Duration::ZERO), Duration::from_secs(2));
+        assert_eq!(
+            BootReadiness::from_create(&o, true).spacesd_budget(Duration::ZERO),
+            Duration::from_secs(2)
+        );
     }
 
     #[test]

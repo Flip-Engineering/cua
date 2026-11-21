@@ -3315,7 +3315,6 @@ impl Spaces {
             name: name.clone(),
             fresh,
         });
-        let timeout = opts.timeout.unwrap_or(Duration::from_secs(600));
         let mut create = CreateOptions::new(ProviderKind::Local, &image).name(&name);
         create.kind = opts.kind;
         create.runtime = opts.runtime.clone();
@@ -3343,7 +3342,7 @@ impl Spaces {
         create.env = opts.env.clone();
         create.env.insert("CUA_ENV_TOKEN".into(), token.clone());
         create.env_token = Some(token.clone());
-        create.ready_timeout = timeout;
+        create.ready_timeout = opts.timeout.unwrap_or(create.ready_timeout);
         create.ready_timeout_given = opts.timeout.is_some();
         create.command = opts.command.clone().filter(|c| !c.is_empty());
         create.gpu = opts.gpu.clone().filter(|g| !g.trim().is_empty());
