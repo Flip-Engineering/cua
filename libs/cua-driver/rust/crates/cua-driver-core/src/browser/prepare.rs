@@ -1025,7 +1025,11 @@ async fn wait_for_spawned_endpoint(
     profile: &Path,
     security_prompt_open: &(dyn Fn() -> bool + Send + Sync),
 ) -> Result<OwnedEndpoint, BrowserRefusal> {
-    let deadline = Instant::now() + Duration::from_secs(20);
+    // Chromium on Linux can take over 30 seconds to create its first
+    // profile on a nested VM. Leave the other platforms' startup budget
+    // unchanged.
+    let startup = Duration::from_secs(if cfg!(target_os = "linux") { 60 } else { 20 });
+    let deadline = Instant::now() + startup;
     let port_file = profile.join("DevToolsActivePort");
     let mut observed_clean_launcher_exit = false;
     loop {
