@@ -3,4 +3,6 @@
 # unknown label and the real errors get lost in the noise.
 self-hosted-runner:
   labels:
+    - flip-macos-lab
+    - flip-windows-lab
     - lume

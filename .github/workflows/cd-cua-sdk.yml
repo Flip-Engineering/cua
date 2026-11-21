@@ -79,7 +79,7 @@ env:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -129,7 +129,9 @@ jobs:
   native:
     needs: version
     name: native ${{ matrix.label }}
-    runs-on: ${{ matrix.runner }}
+    runs-on:
+      group: ${{ matrix.runner.group }}
+      labels: [self-hosted, X64, "${{ matrix.runner.os }}", "${{ matrix.runner.label }}"]
     timeout-minutes: 240
     container: ${{ matrix.container }}
     # Holds the Azure Artifact Signing identity (Windows Authenticode).
@@ -145,12 +147,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { label: linux-x64-gnu, runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, container: "debian:11", lib: libcua_sdk.so, exe: cua }
-          - { label: linux-arm64-gnu, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, container: "debian:11", lib: libcua_sdk.so, exe: cua }
-          - { label: darwin-arm64, runner: macos-26, target: aarch64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
-          - { label: darwin-x64, runner: macos-26, target: x86_64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
-          - { label: win32-x64-msvc, runner: windows-latest, target: x86_64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe }
-          - { label: win32-arm64-msvc, runner: windows-11-arm, target: aarch64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe }
+          - { label: linux-x64-gnu, runner: { group: Default, os: Linux, label: Linux }, target: x86_64-unknown-linux-gnu, container: "debian:11", lib: libcua_sdk.so, exe: cua }
+          - { label: linux-arm64-gnu, runner: { group: Default, os: Linux, label: Linux }, target: aarch64-unknown-linux-gnu, container: "arm64v8/debian:11", lib: libcua_sdk.so, exe: cua }
+          - { label: darwin-arm64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, target: aarch64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
+          - { label: darwin-x64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, target: x86_64-apple-darwin, container: "", lib: libcua_sdk.dylib, exe: cua }
+          - { label: win32-x64-msvc, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, target: x86_64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe, goarch: amd64 }
+          - { label: win32-arm64-msvc, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, target: aarch64-pc-windows-msvc, container: "", lib: cua_sdk.dll, exe: cua.exe, goarch: arm64 }
     defaults:
       run:
         shell: bash
@@ -175,6 +177,12 @@ jobs:
           Acquire::https::Timeout "30";
           EOF
           PACKAGES="git ca-certificates curl build-essential pkg-config unzip python3 xz-utils cmake"
+          if [ "${{ matrix.label }}" = linux-arm64-gnu ]; then
+            # binfmt runs the ARM64 tools. The mounted Actions Node binary
+            # comes from the x64 runner and needs its own dynamic loader.
+            dpkg --add-architecture amd64
+            PACKAGES="$PACKAGES libc6:amd64 libstdc++6:amd64"
+          fi
           apt_retry() {
             n=0
             until "$@"; do
@@ -220,6 +228,11 @@ jobs:
         if: matrix.container == ''
         with:
           node-version: "22"
+      - name: Select the installed macOS SDK for native and cross builds
+        if: runner.os == 'macOS'
+        run: |
+          echo "SDKROOT=$(xcrun --sdk macosx --show-sdk-path)" >> "$GITHUB_ENV"
+          xcrun --sdk macosx --show-sdk-version
       # The Windows signing step needs the ArtifactSigning PowerShell module.
       # Install it (with retries) and prove its cmdlet resolves now, so a
       # problem fails the job in seconds and not after the build (#5838).
@@ -241,6 +254,12 @@ jobs:
           mkdir -p "native/${{ matrix.label }}"
           cp "target/${{ matrix.target }}/release/${{ matrix.lib }}" "native/${{ matrix.label }}/"
           cp "target/${{ matrix.target }}/release/${{ matrix.exe }}" "native/${{ matrix.label }}/"
+      - name: Check the cross-built macOS ARM64 binaries
+        if: matrix.label == 'darwin-arm64'
+        run: |
+          for binary in cua libcua_sdk.dylib cua_node_runtime.node; do
+            lipo -verify_arch arm64 "libs/cua/native/darwin-arm64/$binary"
+          done
       - name: Install Go for the Windows VM gateway
         if: runner.os == 'Windows'
         uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
@@ -252,12 +271,28 @@ jobs:
         working-directory: libs/cua
         env:
           CUA_NETGW_VERSION: ${{ needs.version.outputs.version }}
+          GOARCH: ${{ matrix.goarch }}
         run: |
           dest="native/${{ matrix.label }}"
           netgw/build.sh "$dest"
-          "$dest/cua-netgw.exe" -version
+          if [ "$GOARCH" = amd64 ]; then "$dest/cua-netgw.exe" -version; fi
           mkdir -p "$dest/cua-netgw-licenses"
           cp netgw/NOTICE netgw/LICENSES/*.txt "$dest/cua-netgw-licenses/"
+      - name: Check the cross-built Windows ARM64 binaries
+        if: matrix.label == 'win32-arm64-msvc'
+        shell: pwsh
+        working-directory: libs/cua/native/win32-arm64-msvc
+        run: |
+          foreach ($name in @('cua.exe', 'cua-netgw.exe', 'cua_sdk.dll', 'cua_node_runtime.node')) {
+            $reader = [IO.BinaryReader]::new([IO.File]::OpenRead((Resolve-Path $name).Path))
+            try {
+              $reader.BaseStream.Position = 0x3c
+              $reader.BaseStream.Position = $reader.ReadUInt32()
+              if ($reader.ReadUInt32() -ne 0x4550 -or $reader.ReadUInt16() -ne 0xaa64) {
+                throw "$name is not a Windows ARM64 PE binary"
+              }
+            } finally { $reader.Dispose() }
+          }
       # The microVM guest init runs as PID 1 from an initramfs with nothing
       # else in it: it must be static (a dynamic one panics the guest
       # kernel). It ships next to `cua`, where the daemon looks for it.
@@ -273,6 +308,8 @@ jobs:
             echo "::error::cua-microvm-init is dynamically linked"; exit 1
           fi
           cp "$init" "native/${{ matrix.label }}/"
+      # The Intel macOS runner cross-builds both arm64 binaries below: the
+      # monitor via Swift --arch arm64 and guest init via Rust's musl target.
       # macOS microVMs (kind microvm on a Mac): cua's own monitor, cua-vz
       # (Swift, signed below with its virtualization entitlement), and the
       # aarch64 guest init, built static here with rust-lld. Both ship next
@@ -412,18 +449,20 @@ jobs:
   wheels:
     needs: [version, native]
     name: wheel ${{ matrix.platform }}-${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on:
+      group: ${{ matrix.runner.group }}
+      labels: [self-hosted, X64, "${{ matrix.runner.os }}", "${{ matrix.runner.label }}"]
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux, arch: x86_64, runner: ubuntu-latest, native: linux-x64-gnu, lib: libcua_sdk.so }
-          - { platform: linux, arch: arm64, runner: ubuntu-24.04-arm, native: linux-arm64-gnu, lib: libcua_sdk.so }
+          - { platform: linux, arch: x86_64, runner: { group: Default, os: Linux, label: Linux }, native: linux-x64-gnu, lib: libcua_sdk.so }
+          - { platform: linux, arch: arm64, runner: { group: Default, os: Linux, label: Linux }, native: linux-arm64-gnu, lib: libcua_sdk.so }
           # One wheel per macOS arch: a universal2 wheel is over PyPI's 100 MB file limit.
-          - { platform: darwin, arch: arm64, runner: macos-26, native: darwin-arm64, lib: libcua_sdk.dylib }
-          - { platform: darwin, arch: x86_64, runner: macos-15-intel, native: darwin-x64, lib: libcua_sdk.dylib }
-          - { platform: windows, arch: x86_64, runner: windows-latest, native: win32-x64-msvc, lib: cua_sdk.dll }
-          - { platform: windows, arch: arm64, runner: windows-11-arm, native: win32-arm64-msvc, lib: cua_sdk.dll }
+          - { platform: darwin, arch: arm64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, native: darwin-arm64, lib: libcua_sdk.dylib }
+          - { platform: darwin, arch: x86_64, runner: { group: flip-lab-os, os: macOS, label: flip-macos-lab }, native: darwin-x64, lib: libcua_sdk.dylib }
+          - { platform: windows, arch: x86_64, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, native: win32-x64-msvc, lib: cua_sdk.dll }
+          - { platform: windows, arch: arm64, runner: { group: flip-lab-os, os: Windows, label: flip-windows-lab }, native: win32-arm64-msvc, lib: cua_sdk.dll }
     defaults:
       run:
         shell: bash
@@ -489,6 +528,7 @@ jobs:
       - name: Check the wheel ships the static cua-spacesd in cua/bin/
         run: .github/scripts/check_static_spacesd_packaged.sh libs/cua/python/dist
       - name: Import the wheel
+        if: matrix.arch == 'x86_64'
         working-directory: libs/cua/python
         run: |
           VERSION="${{ needs.version.outputs.version }}"
@@ -502,6 +542,18 @@ jobs:
           python -m pip install --force-reinstall dist/*.whl
           cd / && python -c "import cua, sys; v = cua.cua_sdk_version(); print(v); cua.embedded(); sys.exit(v != sys.argv[1])" "$VERSION"
           test "$(cua --version | tr -d '\r')" = "cua $VERSION"
+      - name: Import the Linux ARM64 wheel in a lab binfmt container
+        if: matrix.platform == 'linux' && matrix.arch == 'arm64'
+        working-directory: libs/cua/python
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+        run: |
+          docker run --rm --platform linux/arm64 -e VERSION \
+            -v "$PWD/dist:/wheels:ro" arm64v8/python:3.12-slim-bookworm sh -ec '
+              python -m pip install /wheels/*.whl
+              python -c "import cua, sys; v = cua.cua_sdk_version(); print(v); cua.embedded(); sys.exit(v != sys.argv[1])" "$VERSION"
+              test "$(cua --version)" = "cua $VERSION"
+            '
       # The cua-cli wheel with the binary inside only served the smoke test
       # above. The release ships one thin cua-cli wheel, built in `publish`
       # from the CLI archives (libs/cua/python/cli/build_thin_wheel.py).
@@ -515,7 +567,7 @@ jobs:
 
   npm:
     needs: [version, native]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - name: Free disk space
         run: |
@@ -575,7 +627,9 @@ jobs:
   xcframework-slice:
     name: xcframework-slice (${{ matrix.target }})
     needs: version
-    runs-on: macos-26
+    runs-on:
+      group: flip-lab-os
+      labels: [self-hosted, macOS, X64, flip-macos-lab]
     # A slice takes about 25 minutes.
     timeout-minutes: 60
     strategy:
@@ -611,7 +665,9 @@ jobs:
 
   xcframework:
     needs: [version, xcframework-slice]
-    runs-on: macos-26
+    runs-on:
+      group: flip-lab-os
+      labels: [self-hosted, macOS, X64, flip-macos-lab]
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -640,7 +696,7 @@ jobs:
   # of the Rust crates. Runs on every build, publishing or not.
   protos-and-crates:
     needs: version
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 90
     permissions:
       contents: read
@@ -677,7 +733,7 @@ jobs:
     # CLI or the installer feed. attach-xcframework adds it to the release.
     needs: [version, wheels, npm, native, protos-and-crates]
     if: needs.version.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
       id-token: write
@@ -910,7 +966,7 @@ jobs:
   crates:
     needs: [version, publish]
     if: needs.version.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
     permissions:
       contents: read
@@ -940,7 +996,7 @@ jobs:
   attach-xcframework:
     needs: [version, xcframework, publish]
     if: needs.version.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 20
     permissions:
       contents: write
@@ -982,7 +1038,7 @@ jobs:
     needs: [version, publish]
     if: >-
       !cancelled() && github.repository == 'trycua/cua' && needs.publish.result == 'success' && needs.version.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     continue-on-error: true
     timeout-minutes: 90
     # The publish role trusts main and this environment (OIDC).
@@ -1011,7 +1067,7 @@ jobs:
     needs: [version, attach-xcframework]
     if: >-
       !cancelled() && github.repository == 'trycua/cua' && needs.attach-xcframework.result == 'success'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     continue-on-error: true
     timeout-minutes: 90
     # The publish role trusts main and this environment (OIDC).

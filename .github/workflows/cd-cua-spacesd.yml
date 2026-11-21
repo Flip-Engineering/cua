@@ -75,7 +75,7 @@ env:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -124,7 +124,7 @@ jobs:
   check-version:
     needs: version
     if: needs.version.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -143,23 +143,32 @@ jobs:
   linux:
     needs: version
     name: linux ${{ matrix.arch }}
-    runs-on: ${{ matrix.runner }}
+    runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 90
-    container: debian:11
+    container:
+      image: ${{ matrix.image }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, runner: ubuntu-latest, target: x86_64-unknown-linux-gnu, profile: release }
-          - { arch: aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-gnu, profile: release }
+          - { arch: x86_64, image: "debian:11", target: x86_64-unknown-linux-gnu, profile: release }
+          - { arch: aarch64, image: "arm64v8/debian:11", target: aarch64-unknown-linux-gnu, profile: release }
           # The static headless daemon injected into OCI images (the small
           # `static` profile of libs/cua-spacesd/Cargo.toml).
-          - { arch: x86_64, runner: ubuntu-latest, target: x86_64-unknown-linux-musl, profile: static }
-          - { arch: aarch64, runner: ubuntu-24.04-arm, target: aarch64-unknown-linux-musl, profile: static }
+          - { arch: x86_64, image: "debian:11", target: x86_64-unknown-linux-musl, profile: static }
+          - { arch: aarch64, image: "arm64v8/debian:11", target: aarch64-unknown-linux-musl, profile: static }
     defaults:
       run:
         shell: bash
     steps:
+      # The lab's binfmt support runs the ARM64 container. The Actions
+      # runner mounts its own x64 Node executable into that container.
+      - name: Make the Actions runtime available in the ARM64 container
+        if: matrix.arch == 'aarch64'
+        run: |
+          dpkg --add-architecture amd64
+          apt-get -o Acquire::Retries=5 update
+          apt-get -o Acquire::Retries=5 install -y --no-install-recommends libc6:amd64 libstdc++6:amd64
       # debian:11 is bare. Without git, actions/checkout downloads the tree
       # through the REST API, which is all the build needs.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -201,8 +210,9 @@ jobs:
   macos:
     needs: version
     name: macos universal
-    # macOS 26: the ScreenCaptureKit dependency needs that SDK.
-    runs-on: macos-26
+    runs-on:
+      group: flip-lab-os
+      labels: [self-hosted, macOS, X64, flip-macos-lab]
     timeout-minutes: 120
     env:
       # Hoisted so step conditions never read `secrets` directly.
@@ -229,10 +239,15 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
-      - name: Build arm64 and x86_64
+      - name: Build x86_64 and cross-compile arm64 using the macOS SDK
         working-directory: libs/cua-spacesd
         run: |
           set -euo pipefail
+          # The Intel lab uses the same installed SDK for both target slices.
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
+          # ScreenCaptureKit in this tree needs the macOS 26 SDK or later.
+          test "${sdk_version%%.*}" -ge 26
           for target in aarch64-apple-darwin x86_64-apple-darwin; do
             cargo build --locked --release --target "$target" -p cua-spacesd --bin cua-spacesd
           done
@@ -245,7 +260,7 @@ jobs:
             target/aarch64-apple-darwin/release/cua-spacesd \
             target/x86_64-apple-darwin/release/cua-spacesd \
             -output target/universal/cua-spacesd
-          lipo -info target/universal/cua-spacesd
+          lipo -verify_arch arm64 x86_64 target/universal/cua-spacesd
           # .cargo/config.toml links the Swift runtime rpath for both slices.
           otool -l target/universal/cua-spacesd | grep -A2 LC_RPATH | grep -q /usr/lib/swift
 
@@ -362,7 +377,9 @@ jobs:
   windows:
     needs: version
     name: windows x86_64
-    runs-on: windows-latest
+    runs-on:
+      group: flip-lab-os
+      labels: [self-hosted, Windows, X64, flip-windows-lab]
     timeout-minutes: 90
     # The Azure Artifact Signing vars live in this environment (as for the
     # Cua Driver release); without it they read empty and signing is skipped.
@@ -465,7 +482,7 @@ jobs:
   release:
     needs: [version, check-version, linux, macos, windows]
     if: needs.version.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     permissions:
       contents: write
       # Keyless Sigstore signing of the release assets.
@@ -562,7 +579,7 @@ jobs:
     needs: [version, release]
     if: >-
       !cancelled() && github.repository == 'trycua/cua' && needs.release.result == 'success' && needs.version.outputs.publish == 'true'
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, Linux, X64]
     continue-on-error: true
     timeout-minutes: 90
     # The publish role trusts main and this environment (OIDC).
