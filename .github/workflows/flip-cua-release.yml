@@ -1,0 +1,127 @@
+name: "Flip: Cua Spaces CLI release"
+
+# Builds the Cua Spaces build of the `cua` command (cua-spaces-cli: the MIT `cua` plus the
+# Keyvault, the Cua Volume and the daemon extensions) from this fork's flip/main for the
+# computers MyFlip runs VMs on, and publishes it as the release `flip-cua-<commit>` with a
+# manifest of SHA-256 digests. flip-engineer/flip pins that manifest (priv/cua/connect/fork-cua.json)
+# and its installer and update step download only what the manifest lists.
+#
+# Every job runs on Flip's own runners. Nothing here uses a GitHub-hosted runner.
+#
+# The Cua Spaces build is licensed FSL-1.1-MIT (libs/cua/crates/cua-spaces-cli/LICENSE). The
+# release carries that licence text and the upstream commit this build is based on.
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Commit of this repository to build (default: the branch head)"
+        required: false
+        default: ""
+  push:
+    tags: ["flip-cua-build-*"]
+
+permissions:
+  contents: write
+
+concurrency:
+  group: flip-cua-release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CUA_TELEMETRY: "0"
+  DO_NOT_TRACK: "1"
+  CARGO_NET_RETRY: "10"
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  build:
+    name: ${{ matrix.target }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: linux-x64
+            triple: x86_64-unknown-linux-gnu
+            runs-on: '["self-hosted", "Linux", "X64"]'
+            binary: cua-spaces-cli
+          - target: linux-arm64
+            triple: aarch64-unknown-linux-gnu
+            runs-on: '["self-hosted", "Linux", "X64"]'
+            binary: cua-spaces-cli
+          - target: macos-x64
+            triple: x86_64-apple-darwin
+            runs-on: '["macOS", "X64", "flip-macos-lab"]'
+            binary: cua-spaces-cli
+          - target: windows-x64
+            triple: x86_64-pc-windows-msvc
+            runs-on: '["Windows", "X64", "flip-windows-lab"]'
+            binary: cua-spaces-cli.exe
+    runs-on: ${{ fromJSON(matrix.runs-on) }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+      - name: Toolchain
+        run: |
+          channel=$(sed -n 's/^channel *= *"\(.*\)"/\1/p' libs/cua/rust-toolchain.toml)
+          rustup toolchain install "$channel" --profile minimal --target "${{ matrix.triple }}"
+          echo "RUSTUP_TOOLCHAIN=$channel" >> "$GITHUB_ENV"
+      - name: Cross linker (linux-arm64)
+        if: matrix.target == 'linux-arm64'
+        run: echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+      - name: Build
+        working-directory: libs/cua
+        run: cargo build --release --locked --target "${{ matrix.triple }}" -p cua-spaces-cli --bin cua-spaces-cli
+      - name: Collect
+        run: |
+          out="dist/${{ matrix.target }}"
+          mkdir -p "$out"
+          cp "libs/cua/target/${{ matrix.triple }}/release/${{ matrix.binary }}" "$out/"
+          (cd "$out" && if command -v sha256sum >/dev/null; then sha256sum "${{ matrix.binary }}"; else shasum -a 256 "${{ matrix.binary }}"; fi) > "$out/${{ matrix.binary }}.sha256"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cua-${{ matrix.target }}
+          path: dist/${{ matrix.target }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ["self-hosted", "Linux", "X64"]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Manifest and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          revision=$(git rev-parse HEAD)
+          upstream=$(git merge-base HEAD upstream/main 2>/dev/null || git merge-base HEAD origin/main)
+          python3 - "$revision" "$upstream" <<'PY'
+          import json, sys, pathlib
+          revision, upstream = sys.argv[1:3]
+          artifacts = {}
+          for directory in sorted(pathlib.Path("dist").glob("cua-*")):
+              target = directory.name[len("cua-"):]
+              for sha_file in directory.glob("*.sha256"):
+                  digest, name = sha_file.read_text().split()[:2]
+                  artifacts[target] = {"file": f"{target}-{name.lstrip('*')}", "sha256": digest}
+                  (directory / name.lstrip("*")).rename(directory.parent / artifacts[target]["file"])
+          manifest = {"source_revision": revision, "upstream_revision": upstream, "license": "FSL-1.1-MIT",
+                      "signed": False, "artifacts": artifacts}
+          pathlib.Path("dist/flip-cua-manifest.json").write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+          PY
+          cp libs/cua/crates/cua-spaces-cli/LICENSE dist/LICENSE-FSL-1.1-MIT
+          tag="flip-cua-${revision}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --target "$revision" \
+            --title "Flip Cua Spaces CLI $revision" \
+            --notes "Cua Spaces CLI built from $revision (upstream base $upstream). Licence: FSL-1.1-MIT, text attached. Unsigned." \
+            dist/flip-cua-manifest.json dist/LICENSE-FSL-1.1-MIT $(ls dist/*-cua-spaces-cli* 2>/dev/null)
