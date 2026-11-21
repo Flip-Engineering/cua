@@ -490,6 +490,13 @@ fn active_port_endpoint(pid: i64) -> Result<Option<OwnedEndpoint>, BrowserRefusa
     let Some(user_data_dir) = user_data_dir_for_pid(pid)? else {
         return Ok(None);
     };
+    profile_port_endpoint(pid, &user_data_dir)
+}
+
+fn profile_port_endpoint(
+    pid: i64,
+    user_data_dir: &std::path::Path,
+) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
     let text = match std::fs::read_to_string(user_data_dir.join("DevToolsActivePort")) {
         Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -957,6 +964,17 @@ impl BrowserPlatform for LinuxBrowserPlatform {
         Ok(None)
     }
 
+    async fn discover_spawned_endpoint(
+        &self,
+        pid: i64,
+        expected_ws_url: &str,
+    ) -> Result<Option<OwnedEndpoint>, BrowserRefusal> {
+        // The isolated profile has the exact WebSocket route. Chromium may
+        // open that listener before it answers /json/version. Prove its
+        // socket still belongs to the launched process tree.
+        Ok(active_port_endpoint(pid)?.filter(|endpoint| endpoint.ws_url == expected_ws_url))
+    }
+
     async fn discover_existing_profile_endpoint(
         &self,
         pid: i64,
@@ -1407,6 +1425,30 @@ impl BrowserPlatform for LinuxBrowserPlatform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profile_port_requires_an_owned_loopback_listener_without_http_discovery() {
+        use std::net::TcpListener;
+
+        let profile = tempfile::tempdir().unwrap();
+        let port_file = profile.path().join("DevToolsActivePort");
+        let pid = i64::from(std::process::id());
+        let owned = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = owned.local_addr().unwrap().port();
+        let route = "/devtools/browser/owned";
+        std::fs::write(&port_file, format!("{port}\n{route}\n")).unwrap();
+
+        let endpoint = profile_port_endpoint(pid, profile.path()).unwrap().unwrap();
+        assert_eq!(endpoint.ws_url, format!("ws://127.0.0.1:{port}{route}"));
+        assert_eq!(endpoint.ownership.owner_pid, pid);
+
+        let non_loopback = TcpListener::bind(("0.0.0.0", 0)).unwrap();
+        let port = non_loopback.local_addr().unwrap().port();
+        std::fs::write(&port_file, format!("{port}\n{route}\n")).unwrap();
+        assert!(profile_port_endpoint(pid, profile.path())
+            .unwrap()
+            .is_none());
+    }
 
     #[test]
     fn default_user_data_dir_follows_the_browser_process_config_home() {
