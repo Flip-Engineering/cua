@@ -36,7 +36,8 @@ name: "CD: cua-spacesd"
 #
 # A manual dispatch is a dry run by default (artifacts only). With
 # dry_run=false it rebuilds an existing `cua-spacesd-v<version>` tag and
-# uploads to its release (recovery for a failed tag run).
+# uploads to its release (recovery for a failed tag run). Flip packaging tags
+# append -flip.N to the unchanged upstream daemon version.
 
 on:
   push:
@@ -75,9 +76,7 @@ env:
 
 jobs:
   version:
-    runs-on:
-      group: baton2-native-homelab
-      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
+    runs-on: [self-hosted, Linux, X64, docker-linux]
     outputs:
       version: ${{ steps.v.outputs.version }}
       tag: ${{ steps.v.outputs.tag }}
@@ -126,9 +125,7 @@ jobs:
   check-version:
     needs: version
     if: needs.version.outputs.publish == 'true'
-    runs-on:
-      group: baton2-native-homelab
-      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
+    runs-on: [self-hosted, Linux, X64, docker-linux]
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
@@ -140,51 +137,33 @@ jobs:
           set -euo pipefail
           FILE_VERSION="$(tr -d '[:space:]' < libs/cua-spacesd/VERSION)"
           CARGO_VERSION="$(sed -n '/^\[workspace.package\]/,/^\[/s/^version = "\(.*\)"$/\1/p' libs/cua-spacesd/Cargo.toml)"
-          echo "tag=$VERSION VERSION=$FILE_VERSION Cargo.toml=$CARGO_VERSION"
-          test "$FILE_VERSION" = "$VERSION"
-          test "$CARGO_VERSION" = "$VERSION"
+          SOURCE_VERSION="$VERSION"
+          if [[ "$GITHUB_REPOSITORY" == Flip-Engineering/cua && "$VERSION" =~ ^([0-9]+\.[0-9]+\.[0-9]+)-flip\.[1-9][0-9]*$ ]]; then
+            SOURCE_VERSION="${BASH_REMATCH[1]}"
+          fi
+          echo "tag=$VERSION source=$SOURCE_VERSION VERSION=$FILE_VERSION Cargo.toml=$CARGO_VERSION"
+          test "$FILE_VERSION" = "$SOURCE_VERSION"
+          test "$CARGO_VERSION" = "$SOURCE_VERSION"
 
   linux:
     needs: version
     name: linux ${{ matrix.arch }}
-    runs-on:
-      group: baton2-native-homelab
-      labels: [self-hosted, Linux, X64, baton2-native-linux-x64]
-    timeout-minutes: 90
-    container:
-      image: ${{ matrix.image }}
+    runs-on: [self-hosted, Linux, X64, docker-linux]
+    container: debian:11
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, image: "debian:11", target: x86_64-unknown-linux-gnu, profile: release }
-          - { arch: aarch64, image: "arm64v8/debian:11", target: aarch64-unknown-linux-gnu, profile: release }
+          - { arch: x86_64, target: x86_64-unknown-linux-gnu, profile: release }
+          - { arch: aarch64, target: aarch64-unknown-linux-gnu, profile: release }
           # The static headless daemon injected into OCI images (the small
           # `static` profile of libs/cua-spacesd/Cargo.toml).
-          - { arch: x86_64, image: "debian:11", target: x86_64-unknown-linux-musl, profile: static }
-          - { arch: aarch64, image: "arm64v8/debian:11", target: aarch64-unknown-linux-musl, profile: static }
+          - { arch: x86_64, target: x86_64-unknown-linux-musl, profile: static }
+          - { arch: aarch64, target: aarch64-unknown-linux-musl, profile: static }
     defaults:
       run:
         shell: bash
     steps:
-      # The lab's binfmt support runs the ARM64 container. The Actions
-      # runner mounts its own x64 Node executable into that container.
-      - name: Make the Actions runtime available in the ARM64 container
-        if: matrix.arch == 'aarch64'
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          dpkg --add-architecture amd64
-          # Bullseye's live security archive still lists libc6, but its
-          # binary has moved to the signed Debian archive. This bootstrap
-          # runs before checkout, so the source build-deps script is absent.
-          rm -f /etc/apt/sources.list.d/debian.sources
-          cat > /etc/apt/sources.list <<'EOF'
-          deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://archive.debian.org/debian bullseye main
-          deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://archive.debian.org/debian-security bullseye-security main
-          EOF
-          apt-get -o Dir::Etc::sourceparts=- -o Acquire::Retries=5 update
-          apt-get -o Dir::Etc::sourceparts=- -o Acquire::Retries=5 install -y --no-install-recommends libc6:amd64 libstdc++6:amd64
       # debian:11 is bare. Without git, actions/checkout downloads the tree
       # through the REST API, which is all the build needs.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -192,6 +171,10 @@ jobs:
           ref: ${{ needs.version.outputs.ref }}
       - name: Install build dependencies
         run: bash libs/cua-spacesd/packaging/release/debian-build-deps.sh
+      - &setup_linux_arm64
+        name: Set up the ARM64 cross toolchain
+        if: matrix.arch == 'aarch64'
+        run: bash libs/cua-spacesd/packaging/release/setup-linux-arm64.sh ${{ matrix.target }}
       - name: Install protoc
         uses: ./.github/actions/setup-protoc
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -200,10 +183,17 @@ jobs:
       - name: Build
         working-directory: libs/cua-spacesd
         env:
-          # ring's C code for the arm64 musl target: the arm runner has no
-          # aarch64-linux-musl-gcc, but its native musl-gcc builds for it.
-          CC_aarch64_unknown_linux_musl: musl-gcc
-        run: cargo build --locked --profile ${{ matrix.profile }} --target ${{ matrix.target }} -p cua-spacesd --bin cua-spacesd
+          TARGET: ${{ matrix.target }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          case "$TARGET" in
+            aarch64-unknown-linux-gnu) zig_target="$TARGET.2.31" ;;
+            aarch64-unknown-linux-musl) zig_target="$TARGET" ;;
+            *) exec cargo build --target "$TARGET" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd ;;
+          esac
+          # Zig opens the link's object files together. Use the container's allowed limit.
+          ulimit -Sn "$(ulimit -Hn)"
+          cargo zigbuild --target "$zig_target" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd
       - name: Check glibc floor and static OpenSSL
         if: endsWith(matrix.target, '-gnu')
         working-directory: libs/cua-spacesd
@@ -226,10 +216,7 @@ jobs:
   macos:
     needs: version
     name: macos universal
-    runs-on:
-      group: flip-lab-os
-      labels: [self-hosted, macOS, X64, flip-macos-lab]
-    timeout-minutes: 120
+    runs-on: [self-hosted, macOS, X64, flip-macos-lab]
     env:
       # Hoisted so step conditions never read `secrets` directly.
       APPLICATION_CERT_BASE64: ${{ secrets.APPLICATION_CERT_BASE64 }}
@@ -393,10 +380,7 @@ jobs:
   windows:
     needs: version
     name: windows x86_64
-    runs-on:
-      group: flip-lab-os
-      labels: [self-hosted, Windows, X64, flip-windows-lab]
-    timeout-minutes: 90
+    runs-on: [self-hosted, Windows, X64, flip-windows-lab]
     # The Azure Artifact Signing vars live in this environment (as for the
     # Cua Driver release); without it they read empty and signing is skipped.
     environment: cua-driver-release-signing
@@ -495,8 +479,211 @@ jobs:
           path: ${{ runner.temp }}/signing/windows.txt
           if-no-files-found: error
 
+  # The Cua Spaces build of the `cua` command (cua-spaces-cli, FSL-1.1-MIT), built for the
+  # computers MyFlip runs VMs on. Its assets join the cua-spacesd release: each binary is
+  # `cua-spaces-cli-<triple>[.exe]` with a `.sha256` file, listed in SHA256SUMS and signed with
+  # a Sigstore bundle by the release job.
+  cua-cli-linux:
+    needs: version
+    name: cua-cli linux ${{ matrix.arch }}
+    runs-on: [self-hosted, Linux, X64, docker-linux]
+    container: debian:11
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: x86_64, target: x86_64-unknown-linux-gnu }
+          - { arch: aarch64, target: aarch64-unknown-linux-gnu }
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install build dependencies
+        run: bash libs/cua-spacesd/packaging/release/debian-build-deps.sh
+      - *setup_linux_arm64
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: ${{ matrix.target }}
+      - name: Build
+        working-directory: libs/cua
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$TARGET" == aarch64-unknown-linux-gnu ]]; then
+            ulimit -Sn "$(ulimit -Hn)"
+            cargo zigbuild --target "$TARGET.2.31" --locked --release -p cua-spaces-cli --bin cua-spaces-cli
+          else
+            cargo build --target "$TARGET" --locked --release -p cua-spaces-cli --bin cua-spaces-cli
+          fi
+      - name: Check the cross-compiled CLI
+        if: matrix.arch == 'aarch64'
+        working-directory: libs/cua
+        run: bash ../cua-spacesd/packaging/release/check-linux-binary.sh target/${{ matrix.target }}/release/cua-spaces-cli 2.31
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="cua-spaces-cli-${{ matrix.target }}"
+          cp libs/cua/target/${{ matrix.target }}/release/cua-spaces-cli "dist/$name"
+          (cd dist && sha256sum "$name" > "$name.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-cli-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  cua-cli-macos:
+    needs: version
+    name: cua-cli macos
+    runs-on: [self-hosted, macOS, X64, flip-macos-lab]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: aarch64-apple-darwin, x86_64-apple-darwin
+      - name: Build x86_64 and cross-compile arm64 using the macOS SDK
+        working-directory: libs/cua
+        run: |
+          set -euo pipefail
+          export SDKROOT="$(xcrun --sdk macosx --show-sdk-path)"
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            cargo build --locked --release --target "$target" -p cua-spaces-cli --bin cua-spaces-cli
+          done
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          for target in x86_64-apple-darwin aarch64-apple-darwin; do
+            name="cua-spaces-cli-$target"
+            cp "libs/cua/target/$target/release/cua-spaces-cli" "dist/$name"
+            (cd dist && shasum -a 256 "$name" > "$name.sha256")
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-cli-macos
+          path: dist/*
+          if-no-files-found: error
+
+  cua-cli-windows:
+    needs: version
+    name: cua-cli windows x86_64
+    runs-on: [self-hosted, Windows, X64, flip-windows-lab]
+    env:
+      TARGET: x86_64-pc-windows-msvc
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-C target-feature=+crt-static"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: Install Go for the Windows VM gateway
+        uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version-file: libs/cua/netgw/go.mod
+          cache-dependency-path: libs/cua/netgw/go.sum
+      - name: Build
+        working-directory: libs/cua
+        run: cargo build --locked --release --target "$TARGET" -p cua-spaces-cli --bin cua-spaces-cli
+      - name: Build the Windows VM gateway
+        working-directory: libs/cua
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CUA_NETGW_VERSION: ${{ needs.version.outputs.version }}
+        run: netgw/build.sh "$RUNNER_TEMP/cua-netgw"
+      - name: Check the native Windows VM interfaces
+        run: |
+          cli="libs/cua/target/$TARGET/release/cua-spaces-cli.exe"
+          "$cli" host config --help
+          "$cli" daemon --help
+          "$cli" mcp --help
+          "$RUNNER_TEMP/cua-netgw/cua-netgw.exe" -version
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name="cua-spaces-cli-$TARGET.exe"
+          gateway="cua-netgw-$TARGET.exe"
+          cp "libs/cua/target/$TARGET/release/cua-spaces-cli.exe" "dist/$name"
+          cp "$RUNNER_TEMP/cua-netgw/cua-netgw.exe" "dist/$gateway"
+          cp libs/cua/crates/cua-spaces-cli/LICENSE dist/LICENSE-FSL-1.1-MIT
+          cp libs/cua/netgw/NOTICE dist/cua-netgw-NOTICE.txt
+          cp libs/cua/netgw/LICENSES/Apache-2.0-gvisor-tap-vsock.txt dist/cua-netgw-Apache-2.0-gvisor-tap-vsock.txt
+          cd dist
+          for file in "$name" "$gateway" LICENSE-FSL-1.1-MIT cua-netgw-*.txt; do
+            sha256sum "$file" > "$file.sha256"
+          done
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-cli-windows
+          path: dist/*
+          if-no-files-found: error
+
+  # Cua's cursor-theme compiler for Flip's server (flip-engineer/flip#2846): the cua-sdk
+  # sidecar compiles each owner's hand theme with it. One extra asset of the release,
+  # `cua-cursor-theme-x86_64-unknown-linux-gnu` with a `.sha256` file, listed in SHA256SUMS
+  # and signed like the others; it is not one of the spacesd targets.
+  cursor-theme-linux:
+    needs: version
+    name: cua-cursor-theme linux x86_64
+    runs-on: [self-hosted, Linux, X64, docker-linux]
+    timeout-minutes: 90
+    container:
+      image: "debian:11"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install build dependencies
+        run: bash libs/cua-spacesd/packaging/release/debian-build-deps.sh
+      - name: Install protoc
+        uses: ./.github/actions/setup-protoc
+      - uses: dtolnay/rust-toolchain@1.97.1
+        with:
+          targets: x86_64-unknown-linux-gnu
+          components: rustfmt
+      - name: Build
+        working-directory: libs/cua-driver/rust
+        run: cargo build --locked --release --target x86_64-unknown-linux-gnu -p cursor-theme-cli --bin cua-cursor-theme
+      - name: Package
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          name=cua-cursor-theme-x86_64-unknown-linux-gnu
+          cp libs/cua-driver/rust/target/x86_64-unknown-linux-gnu/release/cua-cursor-theme "dist/$name"
+          strip "dist/$name"
+          "dist/$name" list
+          (cd dist && sha256sum "$name" > "$name.sha256")
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-cursor-theme-x86_64-unknown-linux-gnu
+          path: dist/*
+          if-no-files-found: error
+
   release:
-    needs: [version, check-version, linux, macos, windows]
+    needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows, cursor-theme-linux]
     if: needs.version.outputs.publish == 'true'
     runs-on:
       group: baton2-native-homelab
@@ -506,28 +693,34 @@ jobs:
       # Keyless Sigstore signing of the release assets.
       id-token: write
     steps:
+      - name: Create a fresh release directory
+        id: paths
+        run: |
+          staging="$(mktemp -d "$RUNNER_TEMP/cua-release.XXXXXX")"
+          echo "staging=$staging" >> "$GITHUB_OUTPUT"
       - uses: sigstore/cosign-installer@d58896d6a1865668819e1d91763c7751a165e159 # v3.9.2
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: cua-spacesd-*
-          path: release
+          path: ${{ steps.paths.outputs.staging }}/release
           merge-multiple: true
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           pattern: signing-*
-          path: signing
+          path: ${{ steps.paths.outputs.staging }}/signing
           merge-multiple: true
       - name: Verify checksums and write SHA256SUMS
-        working-directory: release
+        working-directory: ${{ steps.paths.outputs.staging }}/release
         run: |
           set -euo pipefail
           for sum in *.sha256; do sha256sum -c "$sum"; done
-          find . -maxdepth 1 -type f ! -name '*.sha256' -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
-          cat SHA256SUMS
+          find . -maxdepth 1 -type f ! -name '*.sha256' ! -name SHA256SUMS -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
+          sha256sum -c SHA256SUMS
           for f in SHA256SUMS $(awk '{print $2}' SHA256SUMS); do
             cosign sign-blob --yes --bundle "$f.sigstore.json" "$f" >/dev/null
           done
       - name: Upload to the GitHub release
+        working-directory: ${{ steps.paths.outputs.staging }}
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.version.outputs.tag }}
@@ -561,6 +754,8 @@ jobs:
             [ -n "$unsigned" ] && label="$label, UNSIGNED: $unsigned"
             {
               echo "**$GITHUB_REPOSITORY prerelease ($label).** Built by cd-cua-spacesd.yml at $GITHUB_REF ($GITHUB_SHA)."
+              echo
+              echo "Cua Spaces CLI is built from Cua AI, Inc. source under the attached FSL-1.1-MIT license."
               echo
               echo "Signing:"
               echo "- linux: no OS code signing (Sigstore bundle only)"
