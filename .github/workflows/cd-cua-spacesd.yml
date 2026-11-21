@@ -149,45 +149,21 @@ jobs:
     needs: version
     name: linux ${{ matrix.arch }}
     runs-on: [self-hosted, Linux, X64, docker-linux]
-    timeout-minutes: 90
-    container:
-      # Actions pulls before applying create options. Pin the ARM64 image
-      # manifest because Docker resolves image indexes for the runner CPU.
-      image: ${{ matrix.image }}
-      options: ${{ matrix.arch == 'aarch64' && '--platform linux/arm64/v8' || '' }}
+    container: debian:11
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, image: "debian:11", target: x86_64-unknown-linux-gnu, profile: release }
-          - { arch: aarch64, image: "arm64v8/debian@sha256:32fc609441a9c8417b2bb5faa62a60afd6af19013e8e82fdeed5d08dc7ac1ad9", target: aarch64-unknown-linux-gnu, profile: release }
+          - { arch: x86_64, target: x86_64-unknown-linux-gnu, profile: release }
+          - { arch: aarch64, target: aarch64-unknown-linux-gnu, profile: release }
           # The static headless daemon injected into OCI images (the small
           # `static` profile of libs/cua-spacesd/Cargo.toml).
-          - { arch: x86_64, image: "debian:11", target: x86_64-unknown-linux-musl, profile: static }
-          - { arch: aarch64, image: "arm64v8/debian@sha256:32fc609441a9c8417b2bb5faa62a60afd6af19013e8e82fdeed5d08dc7ac1ad9", target: aarch64-unknown-linux-musl, profile: static }
+          - { arch: x86_64, target: x86_64-unknown-linux-musl, profile: static }
+          - { arch: aarch64, target: aarch64-unknown-linux-musl, profile: static }
     defaults:
       run:
         shell: bash
     steps:
-      # The lab's binfmt support runs the ARM64 container. The Actions
-      # runner mounts its own x64 Node executable into that container.
-      - &arm64_actions_runtime
-        name: Make the Actions runtime available in the ARM64 container
-        if: matrix.arch == 'aarch64'
-        env:
-          DEBIAN_FRONTEND: noninteractive
-        run: |
-          dpkg --add-architecture amd64
-          # Bullseye's live security archive still lists libc6, but its
-          # binary has moved to the signed Debian archive. This bootstrap
-          # runs before checkout, so the source build-deps script is absent.
-          rm -f /etc/apt/sources.list.d/debian.sources
-          cat > /etc/apt/sources.list <<'EOF'
-          deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://archive.debian.org/debian bullseye main
-          deb [check-valid-until=no signed-by=/usr/share/keyrings/debian-archive-keyring.gpg] http://archive.debian.org/debian-security bullseye-security main
-          EOF
-          apt-get -o Dir::Etc::sourceparts=- -o Acquire::Retries=5 update
-          apt-get -o Dir::Etc::sourceparts=- -o Acquire::Retries=5 install -y --no-install-recommends libc6:amd64 libstdc++6:amd64
       # debian:11 is bare. Without git, actions/checkout downloads the tree
       # through the REST API, which is all the build needs.
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -195,6 +171,10 @@ jobs:
           ref: ${{ needs.version.outputs.ref }}
       - name: Install build dependencies
         run: bash libs/cua-spacesd/packaging/release/debian-build-deps.sh
+      - &setup_linux_arm64
+        name: Set up the ARM64 cross toolchain
+        if: matrix.arch == 'aarch64'
+        run: bash libs/cua-spacesd/packaging/release/setup-linux-arm64.sh ${{ matrix.target }}
       - name: Install protoc
         uses: ./.github/actions/setup-protoc
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -203,10 +183,14 @@ jobs:
       - name: Build
         working-directory: libs/cua-spacesd
         env:
-          # ring's C code for the arm64 musl target: the arm runner has no
-          # aarch64-linux-musl-gcc, but its native musl-gcc builds for it.
-          CC_aarch64_unknown_linux_musl: musl-gcc
-        run: cargo build --locked --profile ${{ matrix.profile }} --target ${{ matrix.target }} -p cua-spacesd --bin cua-spacesd
+          TARGET: ${{ matrix.target }}
+          PROFILE: ${{ matrix.profile }}
+        run: |
+          case "$TARGET" in
+            aarch64-unknown-linux-gnu) cargo zigbuild --target "$TARGET.2.31" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd ;;
+            aarch64-unknown-linux-musl) cargo zigbuild --target "$TARGET" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd ;;
+            *) cargo build --target "$TARGET" --locked --profile "$PROFILE" -p cua-spacesd --bin cua-spacesd ;;
+          esac
       - name: Check glibc floor and static OpenSSL
         if: endsWith(matrix.target, '-gnu')
         working-directory: libs/cua-spacesd
@@ -502,27 +486,23 @@ jobs:
     needs: version
     name: cua-cli linux ${{ matrix.arch }}
     runs-on: [self-hosted, Linux, X64, docker-linux]
-    container:
-      # Actions pulls before applying create options. Pin the ARM64 image
-      # manifest because Docker resolves image indexes for the runner CPU.
-      image: ${{ matrix.image }}
-      options: ${{ matrix.arch == 'aarch64' && '--platform linux/arm64/v8' || '' }}
+    container: debian:11
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { arch: x86_64, image: "debian:11", target: x86_64-unknown-linux-gnu }
-          - { arch: aarch64, image: "arm64v8/debian@sha256:32fc609441a9c8417b2bb5faa62a60afd6af19013e8e82fdeed5d08dc7ac1ad9", target: aarch64-unknown-linux-gnu }
+          - { arch: x86_64, target: x86_64-unknown-linux-gnu }
+          - { arch: aarch64, target: aarch64-unknown-linux-gnu }
     defaults:
       run:
         shell: bash
     steps:
-      - *arm64_actions_runtime
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ needs.version.outputs.ref }}
       - name: Install build dependencies
         run: bash libs/cua-spacesd/packaging/release/debian-build-deps.sh
+      - *setup_linux_arm64
       - name: Install protoc
         uses: ./.github/actions/setup-protoc
       - uses: dtolnay/rust-toolchain@1.97.1
@@ -530,7 +510,18 @@ jobs:
           targets: ${{ matrix.target }}
       - name: Build
         working-directory: libs/cua
-        run: cargo build --locked --release --target ${{ matrix.target }} -p cua-spaces-cli --bin cua-spaces-cli
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          if [[ "$TARGET" == aarch64-unknown-linux-gnu ]]; then
+            cargo zigbuild --target "$TARGET.2.31" --locked --release -p cua-spaces-cli --bin cua-spaces-cli
+          else
+            cargo build --target "$TARGET" --locked --release -p cua-spaces-cli --bin cua-spaces-cli
+          fi
+      - name: Check the cross-compiled CLI
+        if: matrix.arch == 'aarch64'
+        working-directory: libs/cua
+        run: bash ../cua-spacesd/packaging/release/check-linux-binary.sh target/${{ matrix.target }}/release/cua-spaces-cli 2.31
       - name: Package
         run: |
           set -euo pipefail
