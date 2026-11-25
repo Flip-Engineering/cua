@@ -74,6 +74,9 @@ pub struct MachineFacts {
     pub nvidia_driver: Option<String>,
     /// The engine has the NVIDIA container runtime (its device requests reach cards).
     pub nvidia_container_runtime: bool,
+    /// The machine has a CDI spec for NVIDIA's device class ([`NVIDIA_CDI_ALL`]).
+    #[serde(default)]
+    pub nvidia_cdi: bool,
     /// gVisor, when the engine registers it.
     #[serde(default)]
     pub sandbox_runtime: Option<SandboxRuntime>,
@@ -100,8 +103,56 @@ pub struct AccelPlan {
     pub nvidia_devices: Vec<String>,
     /// `NVIDIA_DRIVER_CAPABILITIES` for the sandbox, when it gets NVIDIA cards.
     pub nvidia_capabilities: Option<String>,
+    /// The one standing device request the sandbox is made with: every card of
+    /// the class, resolved by the engine at each start, never a list of cards.
+    #[serde(default)]
+    pub request: Option<StandingRequest>,
     /// Every card of the machine, served or not.
     pub cards: Vec<CardPlan>,
+}
+
+/// A device request for every card of a class, resolved at each start of the
+/// same container: a card added or removed shows at its next start.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StandingRequest {
+    /// A CDI device name for the whole class (`nvidia.com/gpu=all`).
+    Cdi(String),
+    /// The engine's NVIDIA driver with no count limit (`--gpus all`).
+    NvidiaAll,
+}
+
+/// The label that marks a personal Space: the one computer of one person, which
+/// lives for years. It is set on every container made with "the machine's
+/// accelerators" ([`MACHINE`]), the need only a personal Space states. Such a
+/// container is never a warm-pool member or claim, never started from a golden
+/// checkpoint, never forked, and keeps its identity across a restore.
+pub const LABEL_SPACE: &str = "ai.cua.space";
+/// The value of [`LABEL_SPACE`] on a personal Space.
+pub const PERSONAL: &str = "personal";
+
+/// Whether labels mark a personal Space.
+pub fn is_personal<'a>(mut labels: impl Iterator<Item = (&'a String, &'a String)>) -> bool {
+    labels.any(|(k, v)| k == LABEL_SPACE && v == PERSONAL)
+}
+
+/// The CDI name of every NVIDIA card, as `nvidia-ctk cdi generate` writes it.
+pub const NVIDIA_CDI_ALL: &str = "nvidia.com/gpu=all";
+
+/// Whether a directory of CDI specs (`/etc/cdi`, `/var/run/cdi`) holds one for
+/// NVIDIA's device class.
+pub fn has_nvidia_cdi(dirs: &[&Path]) -> bool {
+    dirs.iter().any(|dir| {
+        std::fs::read_dir(dir).is_ok_and(|entries| {
+            entries.flatten().any(|e| {
+                std::fs::read_to_string(e.path()).is_ok_and(|text| {
+                    text.lines().any(|line| {
+                        let line = line.trim().trim_matches(',');
+                        line == "kind: nvidia.com/gpu" || line == "\"kind\": \"nvidia.com/gpu\""
+                    })
+                })
+            })
+        })
+    })
 }
 
 impl AccelPlan {
@@ -188,10 +239,24 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
         };
         cards.push(decided);
     }
-    let nvidia_capabilities = (!nvidia_devices.is_empty()).then(|| {
+    // One standing request whenever the sandbox can take NVIDIA cards at all, also
+    // with none served now: a card added later shows at the next start (#3282).
+    let request = (sandbox.is_some() && facts.nvidia_driver.is_some())
+        .then(|| {
+            if facts.nvidia_cdi {
+                Some(StandingRequest::Cdi(NVIDIA_CDI_ALL.into()))
+            } else if facts.nvidia_container_runtime {
+                Some(StandingRequest::NvidiaAll)
+            } else {
+                None
+            }
+        })
+        .flatten();
+    let nvidia_capabilities = request.as_ref().map(|_| {
         let allowed = &sandbox
-            .expect("devices imply a sandbox")
+            .expect("a request implies a sandbox")
             .driver_capabilities;
+        // gVisor's own default when its entry names none.
         if allowed.is_empty() {
             "compute,utility".to_string()
         } else {
@@ -202,6 +267,7 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
         runtime: sandbox.map(|s| s.name.clone()),
         nvidia_devices,
         nvidia_capabilities,
+        request,
         cards,
     }
 }
@@ -377,8 +443,69 @@ mod tests {
             cards,
             nvidia_driver: Some("1.2.3".into()),
             nvidia_container_runtime: true,
+            nvidia_cdi: false,
             sandbox_runtime: sandbox,
         }
+    }
+
+    #[test]
+    fn the_sandbox_gets_one_standing_request_for_every_card_also_with_none_now() {
+        // Cards now: one request for the class, never a list of the cards.
+        let p = plan(&linux(
+            vec![nvidia("0000:01:00.0", "GPU-a")],
+            Some(gvisor(&["1.2.3"])),
+        ));
+        assert_eq!(p.request, Some(StandingRequest::NvidiaAll));
+        // No card now: the same request, so a card added later shows at the next start.
+        let p = plan(&linux(vec![], Some(gvisor(&["1.2.3"]))));
+        assert_eq!(p.request, Some(StandingRequest::NvidiaAll));
+        // A CDI spec for the class wins over the legacy driver.
+        let mut facts = linux(vec![], Some(gvisor(&["1.2.3"])));
+        facts.nvidia_cdi = true;
+        assert_eq!(
+            plan(&facts).request,
+            Some(StandingRequest::Cdi(NVIDIA_CDI_ALL.into()))
+        );
+        // No sandbox runtime, or no NVIDIA driver loaded: no request at all.
+        assert_eq!(plan(&linux(vec![], None)).request, None);
+        let mut facts = linux(vec![], Some(gvisor(&["1.2.3"])));
+        facts.nvidia_driver = None;
+        assert_eq!(plan(&facts).request, None);
+    }
+
+    #[test]
+    fn only_the_personal_label_marks_a_space() {
+        let mut labels = BTreeMap::new();
+        assert!(!is_personal(labels.iter()));
+        labels.insert(LABEL_SPACE.to_string(), "other".to_string());
+        assert!(!is_personal(labels.iter()));
+        labels.insert(LABEL_SPACE.to_string(), PERSONAL.to_string());
+        assert!(is_personal(labels.iter()));
+    }
+
+    #[test]
+    fn a_cdi_spec_for_nvidia_cards_is_found_in_yaml_or_json() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(!has_nvidia_cdi(&[dir.path()]));
+        std::fs::write(
+            dir.path().join("other.yaml"),
+            "cdiVersion: 0.6.0\nkind: example.com/dev\n",
+        )
+        .unwrap();
+        assert!(!has_nvidia_cdi(&[dir.path()]));
+        std::fs::write(
+            dir.path().join("nvidia.yaml"),
+            "cdiVersion: 0.6.0\nkind: nvidia.com/gpu\n",
+        )
+        .unwrap();
+        assert!(has_nvidia_cdi(&[dir.path()]));
+        let json = tempfile::tempdir().unwrap();
+        std::fs::write(
+            json.path().join("nvidia.json"),
+            "{\n  \"kind\": \"nvidia.com/gpu\",\n}\n",
+        )
+        .unwrap();
+        assert!(has_nvidia_cdi(&[Path::new("/nonexistent"), json.path()]));
     }
 
     #[test]
@@ -386,7 +513,8 @@ mod tests {
         let p = plan(&linux(vec![], Some(gvisor(&["1.2.3"]))));
         assert_eq!(p.runtime.as_deref(), Some("runsc"));
         assert!(p.nvidia_devices.is_empty() && p.cards.is_empty());
-        assert_eq!(p.nvidia_capabilities, None);
+        // The standing request and its capabilities stay, for a card added later.
+        assert_eq!(p.nvidia_capabilities.as_deref(), Some("compute,utility"));
     }
 
     #[test]

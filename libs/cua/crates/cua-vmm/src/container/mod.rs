@@ -434,6 +434,10 @@ impl ContainerRuntime {
             ),
             nvidia_driver: crate::accel::nvidia_driver(std::path::Path::new("/sys")),
             nvidia_container_runtime: runtimes.contains_key("nvidia"),
+            nvidia_cdi: crate::accel::has_nvidia_cdi(&[
+                std::path::Path::new("/etc/cdi"),
+                std::path::Path::new("/var/run/cdi"),
+            ]),
             sandbox_runtime,
         }
     }
@@ -1707,6 +1711,12 @@ impl Runtime for ContainerRuntime {
         if self.inspect(new_name).await?.is_some() {
             return Err(VmmError::AlreadyExists(new_name.into()));
         }
+        let src_labels = self
+            .inspect(source)
+            .await?
+            .and_then(|i| i.config.and_then(|c| c.labels))
+            .unwrap_or_default();
+        refuse_personal_fork(source, &src_labels)?;
         let mut labels = HashMap::new();
         labels.insert("cua.vmm.source".to_string(), source.to_string());
         // A fork inherits its source's egress policy and network settings
@@ -3079,6 +3089,10 @@ fn create_body(
     // the machine's plan then, and the VM's status reads it.
     if let Some(plan) = &spec.accel {
         labels.insert(
+            crate::accel::LABEL_SPACE.into(),
+            crate::accel::PERSONAL.into(),
+        );
+        labels.insert(
             LABEL_ACCEL.into(),
             serde_json::to_string(&plan.cards).unwrap_or_default(),
         );
@@ -3251,6 +3265,17 @@ fn orderly_stop_first(status: &Option<Status>) -> bool {
     matches!(status, Some(Status::Running | Status::Paused))
 }
 
+/// A personal Space is one machine: it is never forked into a second one.
+/// Its checkpoints restore the same Space (#3282).
+fn refuse_personal_fork(source: &str, labels: &HashMap<String, String>) -> Result<()> {
+    if crate::accel::is_personal(labels.iter()) {
+        return Err(VmmError::invalid(format!(
+            "{source} is a personal Space; it is not forked. Its checkpoints restore the same Space."
+        )));
+    }
+    Ok(())
+}
+
 /// The label that records the accelerator plan a container was created with.
 pub const LABEL_ACCEL: &str = "ai.cua.accel";
 
@@ -3271,17 +3296,24 @@ fn gpu_requests(spec: &StartSpec) -> Option<Vec<bollard::models::DeviceRequest>>
     })
 }
 
-/// The engine's device requests for an accelerator plan: the served NVIDIA
-/// cards by the driver's ids, or none.
+/// The engine's device request for an accelerator plan: its one standing
+/// request (every card of the class, resolved at each start), or none.
 fn plan_requests(plan: &crate::accel::AccelPlan) -> Option<Vec<bollard::models::DeviceRequest>> {
-    (!plan.nvidia_devices.is_empty()).then(|| {
-        vec![bollard::models::DeviceRequest {
+    use crate::accel::StandingRequest;
+    let request = match plan.request.as_ref()? {
+        StandingRequest::Cdi(name) => bollard::models::DeviceRequest {
+            driver: Some("cdi".into()),
+            device_ids: Some(vec![name.clone()]),
+            ..Default::default()
+        },
+        StandingRequest::NvidiaAll => bollard::models::DeviceRequest {
             driver: Some("nvidia".into()),
-            device_ids: Some(plan.nvidia_devices.clone()),
+            count: Some(-1),
             capabilities: Some(vec![vec!["gpu".into()]]),
             ..Default::default()
-        }]
-    })
+        },
+    };
+    Some(vec![request])
 }
 
 /// `/dev/shm` of a sandbox container: half its memory limit, at most
@@ -3887,12 +3919,13 @@ mod tests {
     }
 
     #[test]
-    fn a_container_with_the_machines_accelerators_asks_for_the_planned_cards_only() {
+    fn a_container_with_the_machines_accelerators_asks_once_for_every_card() {
         let mut spec = StartSpec::new("sb", ImageSource::Existing);
         spec.accel = Some(crate::accel::AccelPlan {
             runtime: Some("runsc".into()),
             nvidia_devices: vec!["GPU-a".into(), "GPU-b".into()],
             nvidia_capabilities: Some("compute,utility".into()),
+            request: Some(crate::accel::StandingRequest::NvidiaAll),
             cards: vec![crate::accel::CardPlan {
                 pci: "0000:01:00.0".into(),
                 vendor: crate::accel::PCI_NVIDIA.into(),
@@ -3903,11 +3936,12 @@ mod tests {
         let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
         let hc = body.host_config.unwrap();
         let req = hc.device_requests.unwrap();
+        // Every card, resolved at each start: no card ids fixed at create.
         assert_eq!(
-            req[0].device_ids,
-            Some(vec!["GPU-a".to_string(), "GPU-b".to_string()])
+            (req[0].driver.as_deref(), req[0].count),
+            (Some("nvidia"), Some(-1))
         );
-        assert_eq!(req[0].count, None);
+        assert_eq!(req[0].device_ids, None);
         assert_eq!(hc.runtime.as_deref(), Some("runsc"));
         assert!(
             body.env
@@ -3915,12 +3949,173 @@ mod tests {
                 .contains(&"NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string())
         );
         assert!(body.labels.unwrap()[LABEL_ACCEL].contains("0000:01:00.0"));
-        // A plan with no served card asks for no device and sets no capability.
-        spec.accel.as_mut().unwrap().nvidia_devices.clear();
+        // With a CDI spec the request names the class through CDI.
+        spec.accel.as_mut().unwrap().request = Some(crate::accel::StandingRequest::Cdi(
+            crate::accel::NVIDIA_CDI_ALL.into(),
+        ));
+        let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
+        let req = body.host_config.unwrap().device_requests.unwrap();
+        assert_eq!(req[0].driver.as_deref(), Some("cdi"));
+        assert_eq!(
+            req[0].device_ids,
+            Some(vec!["nvidia.com/gpu=all".to_string()])
+        );
+        // A plan without a request asks for no device and sets no capability.
+        spec.accel.as_mut().unwrap().request = None;
         spec.accel.as_mut().unwrap().nvidia_capabilities = None;
         let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
         assert_eq!(body.host_config.unwrap().device_requests, None);
         assert_eq!(body.env, None);
+    }
+
+    /// Proof that a standing device request is resolved at each start of the
+    /// same container, not when it is created (#3282). It needs a container
+    /// engine with CDI turned on, so it is ignored by default; run it with
+    /// `--ignored` on a machine where you may start containers:
+    ///
+    /// - `CUA_TEST_CDI_DIR`: a CDI spec directory the engine reads (`/etc/cdi`
+    ///   or one named in the engine's `cdi-spec-dirs`), writable by the test.
+    /// - `CUA_TEST_IMAGE`: a small image with `sh` and `ls` (default `busybox:1.36`).
+    ///
+    /// The spec's devices are the host's `/dev/null` and `/dev/zero` under new
+    /// names, so no GPU is needed. The container starts with one device, stops,
+    /// the spec grows to two, and the same container (same id) starts with two.
+    #[tokio::test]
+    #[ignore = "starts a container; needs an engine with CDI (see the doc comment)"]
+    async fn the_same_container_sees_the_devices_of_each_start() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("CUA_TEST_CDI_DIR")
+                .expect("CUA_TEST_CDI_DIR names a CDI directory the engine reads"),
+        );
+        let image = std::env::var("CUA_TEST_IMAGE").unwrap_or_else(|_| "busybox:1.36".into());
+        let spec_file = dir.join("flip-test-dev.yaml");
+        let write_spec = |nodes: &[(&str, &str)]| {
+            let edits: String = nodes
+                .iter()
+                .map(|(host, guest)| format!("      - path: {guest}\n        hostPath: {host}\n"))
+                .collect();
+            std::fs::write(
+                &spec_file,
+                format!(
+                    "cdiVersion: 0.6.0\nkind: test.flip/dev\ndevices:\n  - name: all\n    containerEdits:\n      deviceNodes:\n{edits}"
+                ),
+            )
+            .unwrap();
+        };
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let name = format!("flip-cdi-proof-{}", std::process::id());
+        let devices = |docker: Docker, name: String| async move {
+            let exec = docker
+                .create_exec(
+                    &name,
+                    CreateExecOptions {
+                        cmd: Some(vec!["sh", "-c", "ls /dev | grep '^flip-' || true"]),
+                        attach_stdout: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let mut seen = String::new();
+            if let StartExecResults::Attached { mut output, .. } = docker
+                .start_exec(&exec.id, None::<StartExecOptions>)
+                .await
+                .unwrap()
+            {
+                while let Some(Ok(chunk)) = output.next().await {
+                    seen.push_str(&chunk.to_string());
+                }
+            }
+            let mut lines: Vec<String> = seen.lines().map(str::to_string).collect();
+            lines.sort();
+            lines
+        };
+        write_spec(&[("/dev/null", "/dev/flip-0")]);
+        let created = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: Some(name.clone()),
+                    platform: String::new(),
+                }),
+                ContainerCreateBody {
+                    image: Some(image),
+                    cmd: Some(vec!["sleep".into(), "600".into()]),
+                    host_config: Some(HostConfig {
+                        device_requests: Some(vec![bollard::models::DeviceRequest {
+                            driver: Some("cdi".into()),
+                            device_ids: Some(vec!["test.flip/dev=all".into()]),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        docker.start_container(&name, None).await.unwrap();
+        let first = devices(docker.clone(), name.clone()).await;
+        docker
+            .stop_container(
+                &name,
+                Some(StopContainerOptions {
+                    t: Some(10),
+                    signal: None,
+                }),
+            )
+            .await
+            .unwrap();
+        write_spec(&[("/dev/null", "/dev/flip-0"), ("/dev/zero", "/dev/flip-1")]);
+        docker.start_container(&name, None).await.unwrap();
+        let second = devices(docker.clone(), name.clone()).await;
+        let id = docker.inspect_container(&name, None).await.unwrap().id;
+        // Clean up before asserting, so a failed run leaves nothing behind.
+        let _ = docker
+            .stop_container(
+                &name,
+                Some(StopContainerOptions {
+                    t: Some(10),
+                    signal: None,
+                }),
+            )
+            .await;
+        let _ = docker.remove_container(&name, None).await;
+        let _ = std::fs::remove_file(&spec_file);
+        assert_eq!(first, vec!["flip-0"]);
+        assert_eq!(second, vec!["flip-0", "flip-1"]);
+        assert_eq!(id.as_deref(), Some(created.id.as_str()));
+    }
+
+    #[test]
+    fn a_personal_space_carries_its_label_and_is_never_forked() {
+        let mut spec = StartSpec::new("sb", ImageSource::Existing);
+        spec.accel = Some(crate::accel::AccelPlan {
+            runtime: Some("runsc".into()),
+            nvidia_devices: vec![],
+            nvidia_capabilities: None,
+            request: None,
+            cards: vec![],
+        });
+        let labels = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into())
+            .labels
+            .unwrap();
+        assert_eq!(labels[crate::accel::LABEL_SPACE], crate::accel::PERSONAL);
+        assert!(refuse_personal_fork("sb", &labels).is_err());
+        assert!(refuse_personal_fork("other", &HashMap::new()).is_ok());
+        // A plain container is no Space.
+        let plain = create_body(
+            "sb",
+            "img:1",
+            &StartSpec::new("sb", ImageSource::Existing),
+            HashMap::new(),
+            "runc".into(),
+        );
+        assert!(
+            !plain
+                .labels
+                .unwrap_or_default()
+                .contains_key(crate::accel::LABEL_SPACE)
+        );
     }
 
     #[test]

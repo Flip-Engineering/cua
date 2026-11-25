@@ -870,6 +870,9 @@ impl super::ContainerRuntime {
         reference: &str,
     ) -> Option<GoldenPlan> {
         if !self.cfg.warm
+            // A personal Space boots from its own disk, never from a shared golden checkpoint.
+            || spec.accel.is_some()
+            || crate::accel::is_personal(spec.labels.iter())
             || !spec.sidecars.is_empty()
             || spec.gpu.is_some()
             || spec.restrict_network
