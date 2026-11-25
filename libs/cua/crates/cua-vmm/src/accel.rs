@@ -206,30 +206,6 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
     }
 }
 
-/// Whether a sandbox made with the plan recorded in `label` (its cards, as
-/// [`crate::container::LABEL_ACCEL`] keeps them; `None` for one made before plans)
-/// must be made again to get `now`: true when the cards it would hold differ, or
-/// when it runs on another runtime than the plan's. Its files are kept by the caller.
-pub fn needs_new_placement(label: Option<&str>, runtime: Option<&str>, now: &AccelPlan) -> bool {
-    let served = |cards: &[CardPlan]| -> Vec<String> {
-        let mut v: Vec<String> = cards
-            .iter()
-            .filter(|c| c.served)
-            .map(|c| c.pci.clone())
-            .collect();
-        v.sort();
-        v
-    };
-    let before: Vec<CardPlan> = label
-        .and_then(|l| serde_json::from_str(l).ok())
-        .unwrap_or_default();
-    let other_runtime = match (now.runtime.as_deref(), runtime) {
-        (Some(want), Some(have)) => want != have,
-        _ => false,
-    };
-    served(&before) != served(&now.cards) || other_runtime
-}
-
 /// The machine's accelerators as a GPU report row (runtime `machine`): one option
 /// per card, by its PCI address, supported when the plan serves it, with the reason
 /// when not. The existing GPU report carries it to a caller unchanged.
@@ -553,27 +529,6 @@ mod tests {
             p.nvidia_capabilities.as_deref(),
             Some("compute,utility,graphics")
         );
-    }
-
-    #[test]
-    fn a_sandbox_is_made_again_only_when_its_cards_or_runtime_change() {
-        let now = plan(&linux(
-            vec![nvidia("0000:01:00.0", "GPU-a")],
-            Some(gvisor(&["1.2.3"])),
-        ));
-        let label = serde_json::to_string(&now.cards).unwrap();
-        // Same cards on the same runtime: kept as it is.
-        assert!(!needs_new_placement(Some(&label), Some("runsc"), &now));
-        // Made before a card existed (or before plans): made again to get it.
-        assert!(needs_new_placement(None, Some("runsc"), &now));
-        assert!(needs_new_placement(Some("[]"), Some("runsc"), &now));
-        // A card gone: made again without it.
-        let none = plan(&linux(vec![], Some(gvisor(&["1.2.3"]))));
-        assert!(needs_new_placement(Some(&label), Some("runsc"), &none));
-        // Made on runc before the machine had gVisor: made again on gVisor.
-        assert!(needs_new_placement(Some("[]"), Some("runc"), &none));
-        // No card before or now, same runtime: kept.
-        assert!(!needs_new_placement(None, Some("runsc"), &none));
     }
 
     #[test]
