@@ -35,3 +35,21 @@ once. Nothing installs a driver.
 
 `build.sh <amd64|arm64> <work dir> <out dir>` builds `flip-runsc-<label>-<arch>.tar.gz`; the
 `runsc-linux` job of `cd-cua-spacesd.yml` runs it for each release.
+
+## GPU device refresh (#3282)
+
+`apply_refresh.py <gvisor source>` adds two changes for cards that come or go
+while a Space runs (files under `refresh/`):
+
+- runsc's device rule allows every card number of the NVIDIA major whenever
+  the GPU proxy is on for the sandbox (`specutils.NVProxyEnabled`), also for
+  devices given through CDI, not only on the legacy hook path.
+- The control call `containerManager.RefreshNvproxyDevices` and the command
+  `runsc nvproxy refresh <container id>` make the container's `/dev/nvidia<N>`
+  files equal to the cards its device gofer lists. They print
+  `{"added":[...],"removed":[...]}`. The VM service calls them after it made or
+  removed the card's node on the gofer's side.
+
+The planning part has tests that need no GPU (`go test -run Flip ./runsc/boot/`).
+Known limit: a Space that started with no served card has no device gofer in
+that run, so the machine's first card is there from the Space's next start.
