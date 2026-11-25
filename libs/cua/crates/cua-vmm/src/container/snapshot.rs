@@ -64,7 +64,7 @@ pub const WRAPPER_RUNTIME: &str = "cua-runsc";
 pub const WRAPPER_PATH: &str = "/usr/local/lib/cua/cua-runsc";
 /// Bumped with every change to `cua-runsc.sh`: an engine with another
 /// version gets this one installed.
-pub const WRAPPER_VERSION: &str = "1";
+pub const WRAPPER_VERSION: &str = "2";
 /// The OCI annotation naming the checkpoint a container restores on start.
 pub const ANNOTATION_RESTORE: &str = "ai.cua.restore";
 /// The privileged helper container (one per engine).
@@ -600,6 +600,15 @@ impl Helper {
         )
         .await
         .map(drop)
+    }
+
+    /// Saves running container `id` into `dir` and ends it; its next start
+    /// restores it (`cua suspend`). `cuda`: cuda-checkpoint's path inside the
+    /// container, for a Space whose programs may hold GPU state.
+    pub async fn suspend(&self, id: &str, dir: &str, cuda: Option<&str>) -> Result<()> {
+        let mut argv = vec![WRAPPER_PATH, "cua", "suspend", id, dir];
+        argv.extend(cuda);
+        self.run_ok(&argv, Duration::from_secs(600)).await.map(drop)
     }
 
     /// Forgets deleted containers (the record that they were restored).

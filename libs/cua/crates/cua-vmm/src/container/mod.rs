@@ -405,6 +405,79 @@ impl ContainerRuntime {
         Ok(v)
     }
 
+    /// The orderly stop: SIGTERM, then `stop_timeout` seconds before SIGKILL.
+    async fn stop_plain(&self, name: &str) -> Result<()> {
+        for sc in self.sidecar_names(name).await? {
+            let opts = StopContainerOptions {
+                t: Some(self.cfg.stop_timeout),
+                signal: None,
+            };
+            let _ = self.docker.stop_container(&sc, Some(opts)).await;
+        }
+        let opts = StopContainerOptions {
+            t: Some(self.cfg.stop_timeout),
+            signal: None,
+        };
+        match self.docker.stop_container(name, Some(opts)).await {
+            Ok(()) => Ok(()),
+            Err(e) if is_not_found(&e) => Err(VmmError::NotFound(name.into())),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 304, ..
+            }) => Ok(()),
+            Err(e) => Err(engine_err(e)),
+        }
+    }
+
+    /// Saves a running personal Space with its programs into its one
+    /// checkpoint directory and ends it; its next start resumes it. A Space
+    /// whose sandbox asks for GPUs passes cuda-checkpoint's path in the Space
+    /// (`CUA_CUDA_CHECKPOINT`), so CUDA programs keep their GPU state.
+    async fn suspend_space(
+        &self,
+        name: &str,
+        i: &bollard::models::ContainerInspectResponse,
+    ) -> Result<()> {
+        let sup = self.support().await.clone();
+        sup.memory.clone().map_err(VmmError::other)?;
+        let id =
+            i.id.clone()
+                .ok_or_else(|| VmmError::NotFound(name.into()))?;
+        let dir = Self::snap_dir(&sup, &format!("space-{name}"));
+        let gpu = i
+            .host_config
+            .as_ref()
+            .and_then(|h| h.device_requests.as_ref())
+            .is_some_and(|r| !r.is_empty());
+        let cuda = gpu.then(|| {
+            std::env::var(CUDA_CHECKPOINT_ENV).unwrap_or_else(|_| CUDA_CHECKPOINT_PATH.into())
+        });
+        for sc in self.sidecar_names(name).await? {
+            let opts = StopContainerOptions {
+                t: Some(self.cfg.stop_timeout),
+                signal: None,
+            };
+            let _ = self.docker.stop_container(&sc, Some(opts)).await;
+        }
+        let started = std::time::Instant::now();
+        self.helper().suspend(&id, &dir, cuda.as_deref()).await?;
+        tracing::info!(
+            name,
+            ms = started.elapsed().as_millis() as u64,
+            cuda = cuda.is_some(),
+            "Space saved with its programs"
+        );
+        // The sandbox has ended; the engine sees the container stop.
+        let _ = self
+            .docker
+            .wait_container(
+                name,
+                None::<bollard::query_parameters::WaitContainerOptions>,
+            )
+            .next()
+            .await;
+        Ok(())
+    }
+
     /// What this machine has for "the machine's accelerators" ([`crate::accel`]):
     /// its PCI accelerators and drivers, and the engine's runtimes by their exact
     /// names. The gVisor runtime is asked which drivers its GPU proxy supports.
@@ -414,11 +487,16 @@ impl ContainerRuntime {
             Err(_) => Default::default(),
         };
         let mut sandbox_runtime = None;
-        if let Some(runsc) = runtimes.get("runsc") {
-            let path = runsc.path.clone().unwrap_or_else(|| "runsc".into());
+        // cua-runsc is runsc that can also save a Space with its programs and
+        // resume it: a personal Space runs under it when the engine has it.
+        let entry = [snapshot::WRAPPER_RUNTIME, "runsc"]
+            .into_iter()
+            .find_map(|name| runtimes.get(name).map(|r| (name, r)));
+        if let Some((name, runsc)) = entry {
+            let path = runsc.path.clone().unwrap_or_else(|| name.into());
             let args = runsc.runtime_args.clone().unwrap_or_default();
             sandbox_runtime = Some(crate::accel::SandboxRuntime {
-                name: "runsc".into(),
+                name: name.into(),
                 supported_drivers: crate::accel::supported_drivers(
                     &runsc_output(&path, &["nvproxy", "list-supported-drivers"]).await,
                 ),
@@ -1633,25 +1711,21 @@ impl Runtime for ContainerRuntime {
     }
 
     async fn stop(&self, name: &str) -> Result<()> {
-        for sc in self.sidecar_names(name).await? {
-            let opts = StopContainerOptions {
-                t: Some(self.cfg.stop_timeout),
-                signal: None,
-            };
-            let _ = self.docker.stop_container(&sc, Some(opts)).await;
+        // A personal Space's orderly stop keeps its running programs: it is
+        // saved with its memory (and CUDA state) and resumes at its next start.
+        // Where that is not possible, the plain orderly stop runs.
+        if let Some(i) = self.inspect(name).await?
+            && keeps_programs(&i)
+            && self.support().await.ok()
+        {
+            match self.suspend_space(name, &i).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(name, error = %e, "the Space could not be saved with its programs; stopping it in order");
+                }
+            }
         }
-        let opts = StopContainerOptions {
-            t: Some(self.cfg.stop_timeout),
-            signal: None,
-        };
-        match self.docker.stop_container(name, Some(opts)).await {
-            Ok(()) => Ok(()),
-            Err(e) if is_not_found(&e) => Err(VmmError::NotFound(name.into())),
-            Err(bollard::errors::Error::DockerResponseServerError {
-                status_code: 304, ..
-            }) => Ok(()),
-            Err(e) => Err(engine_err(e)),
-        }
+        self.stop_plain(name).await
     }
 
     async fn suspend(&self, name: &str) -> Result<()> {
@@ -1684,7 +1758,15 @@ impl Runtime for ContainerRuntime {
                      (`cua sandbox cp`) and delete it"
                 )));
             }
-            self.start_policed(name).await?;
+            if let Err(e) = self.start_policed(name).await {
+                if !keeps_programs_when_running(&before) {
+                    return Err(e);
+                }
+                // A saved Space whose restore failed (another runsc build, a
+                // driver without cuda-checkpoint): it starts cold, programs lost.
+                tracing::warn!(name, error = %e, "the Space did not resume with its programs; starting it cold");
+                self.start_policed(name).await?;
+            }
             for sc in self.sidecar_names(name).await? {
                 let _ = self.docker.start_container(&sc, None).await;
             }
@@ -2088,7 +2170,8 @@ impl Runtime for ContainerRuntime {
                     let _ = self.docker.unpause_container(&sc).await;
                 }
             }
-            let _ = self.stop(name).await;
+            // A delete never saves the Space: the plain orderly stop.
+            let _ = self.stop_plain(name).await;
         }
         // Sidecars first: they hold the sandbox's network namespace.
         for sc in self.sidecar_names(name).await.unwrap_or_default() {
@@ -3276,6 +3359,34 @@ fn refuse_personal_fork(source: &str, labels: &HashMap<String, String>) -> Resul
     Ok(())
 }
 
+/// Where cuda-checkpoint is inside a Space unless `CUA_CUDA_CHECKPOINT` says.
+const CUDA_CHECKPOINT_PATH: &str = "/usr/local/bin/cuda-checkpoint";
+/// Names cuda-checkpoint's path inside a Space.
+const CUDA_CHECKPOINT_ENV: &str = "CUA_CUDA_CHECKPOINT";
+
+/// Whether a stopped container is a personal Space under the wrapper (one
+/// whose start may resume its saved programs).
+fn keeps_programs_when_running(i: &bollard::models::ContainerInspectResponse) -> bool {
+    i.config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref())
+        .is_some_and(|l| crate::accel::is_personal(l.iter()))
+        && ContainerRuntime::under_wrapper(i)
+}
+
+/// Whether a stop keeps the container's running programs: a personal Space,
+/// running under the checkpointing wrapper runtime.
+fn keeps_programs(i: &bollard::models::ContainerInspectResponse) -> bool {
+    let personal = i
+        .config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref())
+        .is_some_and(|l| crate::accel::is_personal(l.iter()));
+    personal
+        && ContainerRuntime::under_wrapper(i)
+        && ContainerRuntime::status_from(i) == Status::Running
+}
+
 /// The label that records the accelerator plan a container was created with.
 pub const LABEL_ACCEL: &str = "ai.cua.accel";
 
@@ -4116,6 +4227,51 @@ mod tests {
                 .unwrap_or_default()
                 .contains_key(crate::accel::LABEL_SPACE)
         );
+    }
+
+    #[test]
+    fn only_a_running_personal_space_under_the_wrapper_keeps_its_programs() {
+        let make = |personal: bool, runtime: &str, running: bool| {
+            let mut labels = HashMap::new();
+            if personal {
+                labels.insert(
+                    crate::accel::LABEL_SPACE.to_string(),
+                    crate::accel::PERSONAL.to_string(),
+                );
+            }
+            bollard::models::ContainerInspectResponse {
+                config: Some(bollard::models::ContainerConfig {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
+                host_config: Some(HostConfig {
+                    runtime: Some(runtime.into()),
+                    ..Default::default()
+                }),
+                state: Some(bollard::models::ContainerState {
+                    running: Some(running),
+                    status: Some(if running {
+                        bollard::models::ContainerStateStatusEnum::RUNNING
+                    } else {
+                        bollard::models::ContainerStateStatusEnum::EXITED
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        };
+        assert!(keeps_programs(&make(true, snapshot::WRAPPER_RUNTIME, true)));
+        assert!(!keeps_programs(&make(
+            false,
+            snapshot::WRAPPER_RUNTIME,
+            true
+        )));
+        assert!(!keeps_programs(&make(true, "runsc", true)));
+        assert!(!keeps_programs(&make(
+            true,
+            snapshot::WRAPPER_RUNTIME,
+            false
+        )));
     }
 
     #[test]

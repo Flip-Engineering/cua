@@ -14,6 +14,11 @@
 #   info                      what this host supports (key=value lines)
 #   checkpoint <id> <dir>     save running container <id> (memory and its
 #                             gVisor root overlay) into <dir>; it keeps running
+#   suspend <id> <dir> [cuda] save running container <id> into <dir> and end
+#                             it; its next start restores it, the same
+#                             container with its programs (a personal Space's
+#                             orderly stop). [cuda]: the path of cuda-checkpoint
+#                             inside the container, for CUDA programs' GPU state
 #   rm <dir>...               delete checkpoints
 #   forget <id>...            drop what is kept about deleted containers
 set -u
@@ -67,9 +72,43 @@ if [ "${1:-}" = cua ]; then
         mv "$tmp" "$dir"
         exit $?
         ;;
+    suspend)
+        id="${1:?container id}"
+        dir="${2:?checkpoint dir}"
+        cuda="${3:-}"
+        case "$dir" in "$STORE"/*) ;; *)
+            echo "a checkpoint lives under $STORE" >&2
+            exit 2
+            ;;
+        esac
+        case "$id" in */* | .*) echo "bad container id" >&2; exit 2 ;; esac
+        root=$(cat "$STATE/$id.root" 2>/dev/null) || {
+            echo "container $id was not started by cua-runsc" >&2
+            exit 3
+        }
+        tmp="$dir.partial"
+        rm -rf "$tmp"
+        mkdir -p "$tmp" "$STORE/.resume" || exit 1
+        chmod 0700 "$tmp"
+        if [ -n "$cuda" ]; then
+            "$RUNSC" --root "$root" checkpoint --image-path "$tmp" --cuda-checkpoint-path "$cuda" "$id"
+        else
+            "$RUNSC" --root "$root" checkpoint --image-path "$tmp" "$id"
+        fi
+        rc=$?
+        if [ "$rc" -ne 0 ]; then
+            rm -rf "$tmp"
+            exit "$rc"
+        fi
+        rm -rf "$dir"
+        mv "$tmp" "$dir" || exit 1
+        # The next create of this container restores it (once).
+        printf '%s' "$dir" >"$STORE/.resume/$id"
+        exit 0
+        ;;
     forget)
         for id in "$@"; do
-            case "$id" in */* | .*) ;; *) rm -f "$STORE/.restored/$id" ;; esac
+            case "$id" in */* | .*) ;; *) rm -f "$STORE/.restored/$id" "$STORE/.resume/$id" ;; esac
         done
         exit 0
         ;;
@@ -122,9 +161,15 @@ create)
         mkdir -p "$STATE"
         [ -n "$root" ] && printf '%s' "$root" >"$STATE/$id.root"
         img=$(sed -n 's/.*"ai\.cua\.restore":"\([^"]*\)".*/\1/p' "$bundle/config.json" 2>/dev/null | head -n 1)
+        # A container suspended by `cua suspend` resumes: the same container,
+        # the same identity, its programs as they were. The marker is used once,
+        # so a restore that fails is followed by a cold start.
+        if [ -f "$STORE/.resume/$id" ]; then
+            cat "$STORE/.resume/$id" >"$STATE/$id.restore"
+            rm -f "$STORE/.resume/$id"
         # Only the first start restores: a container stopped and started
         # again boots (it has its own identity by then).
-        if [ -n "$img" ] && [ ! -e "$STORE/.restored/$id" ]; then
+        elif [ -n "$img" ] && [ ! -e "$STORE/.restored/$id" ]; then
             printf '%s' "$img" >"$STATE/$id.restore"
         else
             rm -f "$STATE/$id.restore"
