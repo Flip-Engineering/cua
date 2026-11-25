@@ -139,7 +139,9 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
         } else if card.vendor != PCI_NVIDIA {
             refuse("The sandbox runtime has no proxy for this vendor's devices".into())
         } else if sandbox.is_none() {
-            refuse("The machine has no gVisor runtime; a card goes only into a gVisor sandbox".into())
+            refuse(
+                "The machine has no gVisor runtime; a card goes only into a gVisor sandbox".into(),
+            )
         } else if !facts.nvidia_container_runtime {
             refuse("The container engine has no NVIDIA container runtime".into())
         } else if card.driver.as_deref() != Some("nvidia") {
@@ -150,12 +152,18 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
         } else if card.uuid.is_none() {
             refuse("The NVIDIA driver reports no id for this card".into())
         } else {
-            let sandbox = sandbox.expect("checked above");
+            let Some(sandbox) = sandbox else {
+                unreachable!("a machine without gVisor is refused above")
+            };
             let driver = facts.nvidia_driver.as_deref().unwrap_or("");
             if !sandbox.supported_drivers.iter().any(|d| d == driver) {
                 refuse(format!(
                     "The gVisor GPU proxy does not know NVIDIA driver {}",
-                    if driver.is_empty() { "(none loaded)" } else { driver }
+                    if driver.is_empty() {
+                        "(none loaded)"
+                    } else {
+                        driver
+                    }
                 ))
             } else {
                 match sandbox.card_support.as_ref().map(|all| all.get(&card.pci)) {
@@ -168,7 +176,8 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
                             vendor: card.vendor.clone(),
                             served: true,
                             reason: if support.is_none() {
-                                "unverified: the gVisor runtime cannot check a card before use".into()
+                                "unverified: the gVisor runtime cannot check a card before use"
+                                    .into()
                             } else {
                                 String::new()
                             },
@@ -180,7 +189,9 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
         cards.push(decided);
     }
     let nvidia_capabilities = (!nvidia_devices.is_empty()).then(|| {
-        let allowed = &sandbox.expect("devices imply a sandbox").driver_capabilities;
+        let allowed = &sandbox
+            .expect("devices imply a sandbox")
+            .driver_capabilities;
         if allowed.is_empty() {
             "compute,utility".to_string()
         } else {
@@ -193,6 +204,30 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
         nvidia_capabilities,
         cards,
     }
+}
+
+/// Whether a sandbox made with the plan recorded in `label` (its cards, as
+/// [`crate::container::LABEL_ACCEL`] keeps them; `None` for one made before plans)
+/// must be made again to get `now`: true when the cards it would hold differ, or
+/// when it runs on another runtime than the plan's. Its files are kept by the caller.
+pub fn needs_new_placement(label: Option<&str>, runtime: Option<&str>, now: &AccelPlan) -> bool {
+    let served = |cards: &[CardPlan]| -> Vec<String> {
+        let mut v: Vec<String> = cards
+            .iter()
+            .filter(|c| c.served)
+            .map(|c| c.pci.clone())
+            .collect();
+        v.sort();
+        v
+    };
+    let before: Vec<CardPlan> = label
+        .and_then(|l| serde_json::from_str(l).ok())
+        .unwrap_or_default();
+    let other_runtime = match (now.runtime.as_deref(), runtime) {
+        (Some(want), Some(have)) => want != have,
+        _ => false,
+    };
+    served(&before) != served(&now.cards) || other_runtime
 }
 
 /// The machine's accelerators as a GPU report row (runtime `machine`): one option
@@ -214,7 +249,9 @@ pub fn machine_support(facts: &MachineFacts) -> crate::gpu::GpuSupport {
                         "{} {}{}",
                         c.vendor,
                         card.map(|k| k.device.as_str()).unwrap_or(""),
-                        card.and_then(|k| k.uuid.as_deref()).map(|u| format!(" {u}")).unwrap_or_default()
+                        card.and_then(|k| k.uuid.as_deref())
+                            .map(|u| format!(" {u}"))
+                            .unwrap_or_default()
                     ),
                     experimental: false,
                     supported: c.served,
@@ -273,7 +310,9 @@ fn accelerator_class(class: &str) -> bool {
 }
 
 fn read(path: &Path) -> Option<String> {
-    std::fs::read_to_string(path).ok().map(|s| s.trim().to_string())
+    std::fs::read_to_string(path)
+        .ok()
+        .map(|s| s.trim().to_string())
 }
 
 /// The machine's accelerators under `sys` (`/sys` on a real machine) and the
@@ -287,11 +326,17 @@ pub fn cards(sys: &Path, proc_nvidia: &Path) -> Vec<Card> {
     let mut paths: Vec<PathBuf> = entries.filter_map(|e| e.ok().map(|e| e.path())).collect();
     paths.sort();
     for dev in paths {
-        let Some(class) = read(&dev.join("class")) else { continue };
+        let Some(class) = read(&dev.join("class")) else {
+            continue;
+        };
         if !accelerator_class(&class) {
             continue;
         }
-        let pci = dev.file_name().unwrap_or_default().to_string_lossy().to_string();
+        let pci = dev
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
         let driver = std::fs::read_link(dev.join("driver"))
             .ok()
             .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()));
@@ -304,10 +349,11 @@ pub fn cards(sys: &Path, proc_nvidia: &Path) -> Vec<Card> {
             names.sort();
             names.first().map(|n| format!("/dev/dri/{n}"))
         });
-        let uuid = read(&proc_nvidia.join("gpus").join(&pci).join("information")).and_then(|info| {
-            info.lines()
-                .find_map(|l| l.strip_prefix("GPU UUID:").map(|v| v.trim().to_string()))
-        });
+        let uuid =
+            read(&proc_nvidia.join("gpus").join(&pci).join("information")).and_then(|info| {
+                info.lines()
+                    .find_map(|l| l.strip_prefix("GPU UUID:").map(|v| v.trim().to_string()))
+            });
         found.push(Card {
             pci,
             vendor: read(&dev.join("vendor")).unwrap_or_default(),
@@ -370,22 +416,36 @@ mod tests {
     #[test]
     fn every_nvidia_card_the_proxy_knows_goes_into_the_gvisor_sandbox() {
         let p = plan(&linux(
-            vec![nvidia("0000:01:00.0", "GPU-a"), nvidia("0000:02:00.0", "GPU-b")],
+            vec![
+                nvidia("0000:01:00.0", "GPU-a"),
+                nvidia("0000:02:00.0", "GPU-b"),
+            ],
             Some(gvisor(&["1.2.3"])),
         ));
         assert_eq!(p.runtime.as_deref(), Some("runsc"));
         assert_eq!(p.nvidia_devices, vec!["GPU-a", "GPU-b"]);
         assert_eq!(p.nvidia_capabilities.as_deref(), Some("compute,utility"));
         // No per-card answer from the runtime: served, marked unverified.
-        assert!(p.cards.iter().all(|c| c.served && c.reason.starts_with("unverified")));
+        assert!(
+            p.cards
+                .iter()
+                .all(|c| c.served && c.reason.starts_with("unverified"))
+        );
     }
 
     #[test]
     fn a_driver_the_proxy_does_not_know_keeps_every_card_out_with_the_reason() {
-        let p = plan(&linux(vec![nvidia("0000:01:00.0", "GPU-a")], Some(gvisor(&["9.9.9"]))));
+        let p = plan(&linux(
+            vec![nvidia("0000:01:00.0", "GPU-a")],
+            Some(gvisor(&["9.9.9"])),
+        ));
         assert!(p.nvidia_devices.is_empty());
         assert!(!p.cards[0].served);
-        assert!(p.cards[0].reason.contains("does not know NVIDIA driver 1.2.3"));
+        assert!(
+            p.cards[0]
+                .reason
+                .contains("does not know NVIDIA driver 1.2.3")
+        );
     }
 
     #[test]
@@ -393,16 +453,26 @@ mod tests {
         let mut sandbox = gvisor(&["1.2.3"]);
         sandbox.card_support = Some(BTreeMap::from([
             ("0000:01:00.0".to_string(), Ok(())),
-            ("0000:02:00.0".to_string(), Err("The proxy has no classes for this card".to_string())),
+            (
+                "0000:02:00.0".to_string(),
+                Err("The proxy has no classes for this card".to_string()),
+            ),
         ]));
         let p = plan(&linux(
-            vec![nvidia("0000:01:00.0", "GPU-a"), nvidia("0000:02:00.0", "GPU-b"), nvidia("0000:03:00.0", "GPU-c")],
+            vec![
+                nvidia("0000:01:00.0", "GPU-a"),
+                nvidia("0000:02:00.0", "GPU-b"),
+                nvidia("0000:03:00.0", "GPU-c"),
+            ],
             Some(sandbox),
         ));
         assert_eq!(p.nvidia_devices, vec!["GPU-a"]);
         assert_eq!((p.cards[0].served, p.cards[0].reason.as_str()), (true, ""));
         assert_eq!(p.cards[1].reason, "The proxy has no classes for this card");
-        assert_eq!(p.cards[2].reason, "The gVisor runtime did not report this card");
+        assert_eq!(
+            p.cards[2].reason,
+            "The gVisor runtime did not report this card"
+        );
     }
 
     #[test]
@@ -423,7 +493,10 @@ mod tests {
             render_node: Some("/dev/dri/renderD129".into()),
             uuid: None,
         };
-        let p = plan(&linux(vec![amd, nvidia("0000:01:00.0", "GPU-a")], Some(gvisor(&["1.2.3"]))));
+        let p = plan(&linux(
+            vec![amd, nvidia("0000:01:00.0", "GPU-a")],
+            Some(gvisor(&["1.2.3"])),
+        ));
         assert_eq!(p.nvidia_devices, vec!["GPU-a"]);
         assert!(!p.cards[0].served && p.cards[0].reason.contains("no proxy for this vendor"));
     }
@@ -434,14 +507,24 @@ mod tests {
         vfio.driver = Some("vfio-pci".into());
         let p = plan(&linux(vec![vfio], Some(gvisor(&["1.2.3"]))));
         assert!(p.cards[0].reason.contains("bound to vfio-pci"));
-        let mut facts = linux(vec![nvidia("0000:01:00.0", "GPU-a")], Some(gvisor(&["1.2.3"])));
+        let mut facts = linux(
+            vec![nvidia("0000:01:00.0", "GPU-a")],
+            Some(gvisor(&["1.2.3"])),
+        );
         facts.nvidia_container_runtime = false;
-        assert!(plan(&facts).cards[0].reason.contains("no NVIDIA container runtime"));
+        assert!(
+            plan(&facts).cards[0]
+                .reason
+                .contains("no NVIDIA container runtime")
+        );
     }
 
     #[test]
     fn a_mac_or_windows_machine_passes_no_pci_device() {
-        let mut facts = linux(vec![nvidia("0000:01:00.0", "GPU-a")], Some(gvisor(&["1.2.3"])));
+        let mut facts = linux(
+            vec![nvidia("0000:01:00.0", "GPU-a")],
+            Some(gvisor(&["1.2.3"])),
+        );
         facts.os = "windows".into();
         assert!(plan(&facts).cards[0].reason.contains("runs windows"));
     }
@@ -449,18 +532,48 @@ mod tests {
     #[test]
     fn the_capabilities_are_those_the_proxy_allows() {
         assert_eq!(
-            allowed_capabilities(&["--allow-suid".into(), "--nvproxy-allowed-driver-capabilities=compute,utility,video".into()]),
+            allowed_capabilities(&[
+                "--allow-suid".into(),
+                "--nvproxy-allowed-driver-capabilities=compute,utility,video".into()
+            ]),
             vec!["compute", "utility", "video"]
         );
         assert_eq!(
-            allowed_capabilities(&["--nvproxy-allowed-driver-capabilities".into(), "graphics".into()]),
+            allowed_capabilities(&[
+                "--nvproxy-allowed-driver-capabilities".into(),
+                "graphics".into()
+            ]),
             vec!["graphics"]
         );
         assert!(allowed_capabilities(&[]).is_empty());
         let mut sandbox = gvisor(&["1.2.3"]);
         sandbox.driver_capabilities = vec!["compute".into(), "utility".into(), "graphics".into()];
         let p = plan(&linux(vec![nvidia("0000:01:00.0", "GPU-a")], Some(sandbox)));
-        assert_eq!(p.nvidia_capabilities.as_deref(), Some("compute,utility,graphics"));
+        assert_eq!(
+            p.nvidia_capabilities.as_deref(),
+            Some("compute,utility,graphics")
+        );
+    }
+
+    #[test]
+    fn a_sandbox_is_made_again_only_when_its_cards_or_runtime_change() {
+        let now = plan(&linux(
+            vec![nvidia("0000:01:00.0", "GPU-a")],
+            Some(gvisor(&["1.2.3"])),
+        ));
+        let label = serde_json::to_string(&now.cards).unwrap();
+        // Same cards on the same runtime: kept as it is.
+        assert!(!needs_new_placement(Some(&label), Some("runsc"), &now));
+        // Made before a card existed (or before plans): made again to get it.
+        assert!(needs_new_placement(None, Some("runsc"), &now));
+        assert!(needs_new_placement(Some("[]"), Some("runsc"), &now));
+        // A card gone: made again without it.
+        let none = plan(&linux(vec![], Some(gvisor(&["1.2.3"]))));
+        assert!(needs_new_placement(Some(&label), Some("runsc"), &none));
+        // Made on runc before the machine had gVisor: made again on gVisor.
+        assert!(needs_new_placement(Some("[]"), Some("runc"), &none));
+        // No card before or now, same runtime: kept.
+        assert!(!needs_new_placement(None, Some("runsc"), &none));
     }
 
     #[test]
@@ -471,13 +584,19 @@ mod tests {
             ("0000:02:00.0".to_string(), Err("no classes".to_string())),
         ]));
         let row = machine_support(&linux(
-            vec![nvidia("0000:01:00.0", "GPU-a"), nvidia("0000:02:00.0", "GPU-b")],
+            vec![
+                nvidia("0000:01:00.0", "GPU-a"),
+                nvidia("0000:02:00.0", "GPU-b"),
+            ],
             Some(sandbox),
         ));
         assert_eq!(row.runtime, MACHINE);
         assert_eq!(row.options.len(), 2);
         assert!(row.options[0].supported && row.options[0].label.contains("GPU-a"));
-        assert_eq!((row.options[1].supported, row.options[1].reason.as_str()), (false, "no classes"));
+        assert_eq!(
+            (row.options[1].supported, row.options[1].reason.as_str()),
+            (false, "no classes")
+        );
         let none = machine_support(&linux(vec![], None));
         assert_eq!(none.reason, "The machine has no accelerators");
     }
@@ -485,7 +604,10 @@ mod tests {
     #[test]
     fn the_supported_driver_list_is_read_from_the_runtime_output() {
         let out = "580.126.20\n580.178.04\n580.196.07\n";
-        assert_eq!(supported_drivers(out), vec!["580.126.20", "580.178.04", "580.196.07"]);
+        assert_eq!(
+            supported_drivers(out),
+            vec!["580.126.20", "580.178.04", "580.196.07"]
+        );
         assert!(supported_drivers("no drivers").is_empty());
     }
 
@@ -506,7 +628,11 @@ mod tests {
         std::fs::create_dir_all(&nic).unwrap();
         std::fs::write(nic.join("class"), "0x020000\n").unwrap();
         std::fs::create_dir_all(procn.join("gpus/0000:41:00.0")).unwrap();
-        std::fs::write(procn.join("gpus/0000:41:00.0/information"), "Model: X\nGPU UUID: GPU-1234\n").unwrap();
+        std::fs::write(
+            procn.join("gpus/0000:41:00.0/information"),
+            "Model: X\nGPU UUID: GPU-1234\n",
+        )
+        .unwrap();
         std::fs::create_dir_all(sys.join("module/nvidia")).unwrap();
         std::fs::write(sys.join("module/nvidia/version"), "1.2.3\n").unwrap();
         let found = cards(&sys, &procn);

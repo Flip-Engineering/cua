@@ -1415,8 +1415,21 @@ impl Runtime for ContainerRuntime {
                         .map_err(engine_err)?;
                 } else if st != Status::Running {
                     let have = Self::published(&i);
+                    // The machine's accelerators changed since this container was
+                    // made (a card added or gone, gVisor now present): it is made
+                    // again from a commit, so its files and installed tools stay.
+                    let placement_changed = spec.accel.as_ref().is_some_and(|plan| {
+                        let labels = i.config.as_ref().and_then(|c| c.labels.as_ref());
+                        let runtime = i.host_config.as_ref().and_then(|h| h.runtime.as_deref());
+                        crate::accel::needs_new_placement(
+                            labels.and_then(|l| l.get(LABEL_ACCEL)).map(String::as_str),
+                            runtime,
+                            plan,
+                        )
+                    });
                     if spec.ports.iter().any(|p| !have.contains(p))
                         || self.needs_recreate(&spec.name, &i)
+                        || placement_changed
                     {
                         // Port bindings (and the MAC and capabilities an
                         // egress policy needs) are fixed at create time:
@@ -1670,6 +1683,7 @@ impl Runtime for ContainerRuntime {
             .await?
             .ok_or_else(|| VmmError::NotFound(name.into()))?;
         if Self::status_from(&before) == Status::Stopped {
+            self.follow_machine(name, &before).await?;
             if self.needs_recreate(name, &before) {
                 // Recreating it would drop its writable layer: never done for you.
                 return Err(VmmError::invalid(format!(
@@ -2057,15 +2071,29 @@ impl Runtime for ContainerRuntime {
         // A restored container: the engine forgets it, and a fork that never
         // started still owns its private checkpoint. Its resolv.conf is
         // removed only when it mounts one (when it can't be told, as before).
-        let (restored, image_id, resolv) = match self.inspect(name).await {
+        let (restored, image_id, resolv, status) = match self.inspect(name).await {
             Ok(Some(i)) => (
                 restore_dir(&i).map(|d| (i.id.clone().unwrap_or_default(), d)),
                 i.image.clone(),
                 egress::has_resolv_bind(i.host_config.as_ref().and_then(|h| h.binds.as_ref())),
+                Some(Self::status_from(&i)),
             ),
-            Ok(None) => (None, None, false),
-            Err(_) => (None, None, true),
+            Ok(None) => (None, None, false, None),
+            Err(_) => (None, None, true, None),
         };
+        // A running sandbox is stopped in order before it is removed: its
+        // programs get SIGTERM and `stop_timeout` seconds to close their
+        // devices (a GPU process killed outright can leave the card's
+        // driver in a bad state). A forced remove alone sends SIGKILL.
+        if orderly_stop_first(&status) {
+            if matches!(status, Some(Status::Paused)) {
+                let _ = self.docker.unpause_container(name).await;
+                for sc in self.sidecar_names(name).await.unwrap_or_default() {
+                    let _ = self.docker.unpause_container(&sc).await;
+                }
+            }
+            let _ = self.stop(name).await;
+        }
         // Sidecars first: they hold the sandbox's network namespace.
         for sc in self.sidecar_names(name).await.unwrap_or_default() {
             let _ = self.docker.remove_container(&sc, Some(opts.clone())).await;
@@ -2544,6 +2572,69 @@ impl ContainerRuntime {
                     .map(|n| n.trim_start_matches('/').to_string())
             })
             .collect())
+    }
+
+    /// Puts stopped container `name` (`i`) on the machine's accelerator plan
+    /// of now when it was made with the machine's accelerators (it has the
+    /// [`LABEL_ACCEL`] label) and the cards it would get, or the runtime,
+    /// changed since: a card added or gone, gVisor installed. The container
+    /// is made again from a commit of itself under the same name, so its
+    /// files and installed tools stay; no second container is made.
+    async fn follow_machine(
+        &self,
+        name: &str,
+        i: &bollard::models::ContainerInspectResponse,
+    ) -> Result<()> {
+        let Some(label) = i
+            .config
+            .as_ref()
+            .and_then(|c| c.labels.as_ref())
+            .and_then(|l| l.get(LABEL_ACCEL))
+        else {
+            return Ok(());
+        };
+        let plan = crate::accel::plan(&self.machine_facts().await);
+        let runtime = i.host_config.as_ref().and_then(|h| h.runtime.as_deref());
+        if !crate::accel::needs_new_placement(Some(label), runtime, &plan) {
+            return Ok(());
+        }
+        tracing::info!(name, runtime = ?plan.runtime, cards = plan.nvidia_devices.len(), "the machine's accelerators changed; making the sandbox again with its files");
+        let tag = format!("{name}-accel");
+        self.commit(name, CKPT_REPO, &tag, false).await?;
+        let mut body = placement_body(i, &format!("{CKPT_REPO}:{tag}"), &plan);
+        // The network and egress settings, as `recreate` keeps them.
+        if let Some((net, mac)) = self.mac_config(name).await? {
+            body.labels
+                .get_or_insert_with(Default::default)
+                .insert(egress::LABEL_MAC.into(), mac);
+            body.networking_config = Some(net);
+        }
+        if egress::blocks(name)
+            && let Some(hc) = body.host_config.as_mut()
+        {
+            hc.cap_drop = Some(vec!["NET_RAW".into()]);
+        }
+        self.docker
+            .remove_container(
+                name,
+                Some(RemoveContainerOptions {
+                    force: false,
+                    ..Default::default()
+                }),
+            )
+            .await
+            .map_err(engine_err)?;
+        self.docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: Some(name.to_string()),
+                    platform: String::new(),
+                }),
+                body,
+            )
+            .await
+            .map_err(engine_err)?;
+        Ok(())
     }
 
     /// Replaces never-started container `name` (`i`) by one with `env` and
@@ -3070,7 +3161,11 @@ fn create_body(
         );
     }
     let mut env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
-    if let Some(caps) = spec.accel.as_ref().and_then(|p| p.nvidia_capabilities.as_ref()) {
+    if let Some(caps) = spec
+        .accel
+        .as_ref()
+        .and_then(|p| p.nvidia_capabilities.as_ref())
+    {
         env.push(format!("NVIDIA_DRIVER_CAPABILITIES={caps}"));
     }
     let mut bindings = HashMap::new();
@@ -3227,6 +3322,12 @@ async fn runsc_output(path: &str, args: &[&str]) -> String {
     }
 }
 
+/// Whether [`ContainerBackend::delete`] stops the sandbox in order before it
+/// removes it: when it runs or is paused (a stopped one has no programs left).
+fn orderly_stop_first(status: &Option<Status>) -> bool {
+    matches!(status, Some(Status::Running | Status::Paused))
+}
+
 /// The label that records the accelerator plan a container was created with.
 pub const LABEL_ACCEL: &str = "ai.cua.accel";
 
@@ -3235,14 +3336,7 @@ pub const LABEL_ACCEL: &str = "ai.cua.accel";
 /// driver's ids, for "the machine's accelerators" ([`StartSpec::accel`]).
 fn gpu_requests(spec: &StartSpec) -> Option<Vec<bollard::models::DeviceRequest>> {
     if let Some(plan) = &spec.accel {
-        return (!plan.nvidia_devices.is_empty()).then(|| {
-            vec![bollard::models::DeviceRequest {
-                driver: Some("nvidia".into()),
-                device_ids: Some(plan.nvidia_devices.clone()),
-                capabilities: Some(vec![vec!["gpu".into()]]),
-                ..Default::default()
-            }]
-        });
+        return plan_requests(plan);
     }
     (spec.gpu.as_deref() == Some(crate::gpu::NVIDIA)).then(|| {
         vec![bollard::models::DeviceRequest {
@@ -3252,6 +3346,66 @@ fn gpu_requests(spec: &StartSpec) -> Option<Vec<bollard::models::DeviceRequest>>
             ..Default::default()
         }]
     })
+}
+
+/// The engine's device requests for an accelerator plan: the served NVIDIA
+/// cards by the driver's ids, or none.
+fn plan_requests(plan: &crate::accel::AccelPlan) -> Option<Vec<bollard::models::DeviceRequest>> {
+    (!plan.nvidia_devices.is_empty()).then(|| {
+        vec![bollard::models::DeviceRequest {
+            driver: Some("nvidia".into()),
+            device_ids: Some(plan.nvidia_devices.clone()),
+            capabilities: Some(vec![vec!["gpu".into()]]),
+            ..Default::default()
+        }]
+    })
+}
+
+/// The create body that puts stopped container `i` on accelerator plan
+/// `plan`, from `image` (a commit of it, so its files stay): its runtime,
+/// device requests, driver capabilities and plan label change; its command,
+/// mounts, ports, limits and other labels stay as they were.
+fn placement_body(
+    i: &bollard::models::ContainerInspectResponse,
+    image: &str,
+    plan: &crate::accel::AccelPlan,
+) -> ContainerCreateBody {
+    let cfg = i.config.clone().unwrap_or_default();
+    let mut hc = i.host_config.clone().unwrap_or_default();
+    if let Some(runtime) = &plan.runtime {
+        hc.runtime = Some(runtime.clone());
+    }
+    hc.device_requests = plan_requests(plan);
+    let mut labels = cfg.labels.unwrap_or_default();
+    labels.insert(
+        LABEL_ACCEL.into(),
+        serde_json::to_string(&plan.cards).unwrap_or_default(),
+    );
+    let mut env: Vec<String> = cfg
+        .env
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|e| !e.starts_with("NVIDIA_DRIVER_CAPABILITIES="))
+        .collect();
+    if let Some(caps) = &plan.nvidia_capabilities {
+        env.push(format!("NVIDIA_DRIVER_CAPABILITIES={caps}"));
+    }
+    ContainerCreateBody {
+        image: Some(image.to_string()),
+        env: (!env.is_empty()).then_some(env),
+        entrypoint: cfg.entrypoint,
+        cmd: cfg.cmd,
+        labels: Some(labels),
+        exposed_ports: cfg.exposed_ports,
+        working_dir: cfg.working_dir,
+        user: cfg.user,
+        stop_signal: cfg.stop_signal,
+        hostname: cfg.hostname,
+        // Kept as created (off, see `create_body`).
+        healthcheck: cfg.healthcheck.or_else(|| Some(no_healthcheck())),
+        host_config: Some(hc),
+        ..Default::default()
+    }
 }
 
 /// `/dev/shm` of a sandbox container: half its memory limit, at most
@@ -3873,10 +4027,17 @@ mod tests {
         let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
         let hc = body.host_config.unwrap();
         let req = hc.device_requests.unwrap();
-        assert_eq!(req[0].device_ids, Some(vec!["GPU-a".to_string(), "GPU-b".to_string()]));
+        assert_eq!(
+            req[0].device_ids,
+            Some(vec!["GPU-a".to_string(), "GPU-b".to_string()])
+        );
         assert_eq!(req[0].count, None);
         assert_eq!(hc.runtime.as_deref(), Some("runsc"));
-        assert!(body.env.unwrap().contains(&"NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string()));
+        assert!(
+            body.env
+                .unwrap()
+                .contains(&"NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string())
+        );
         assert!(body.labels.unwrap()[LABEL_ACCEL].contains("0000:01:00.0"));
         // A plan with no served card asks for no device and sets no capability.
         spec.accel.as_mut().unwrap().nvidia_devices.clear();
@@ -3884,6 +4045,79 @@ mod tests {
         let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
         assert_eq!(body.host_config.unwrap().device_requests, None);
         assert_eq!(body.env, None);
+    }
+
+    #[test]
+    fn a_new_placement_keeps_the_sandbox_and_changes_only_its_accelerators() {
+        let mut labels = HashMap::new();
+        labels.insert("cua.space".to_string(), "flip".to_string());
+        labels.insert(LABEL_ACCEL.to_string(), "[]".to_string());
+        let i = bollard::models::ContainerInspectResponse {
+            config: Some(bollard::models::ContainerConfig {
+                image: Some("old:1".into()),
+                env: Some(vec!["A=1".into(), "NVIDIA_DRIVER_CAPABILITIES=all".into()]),
+                cmd: Some(vec!["/init".into()]),
+                labels: Some(labels),
+                ..Default::default()
+            }),
+            host_config: Some(HostConfig {
+                runtime: Some("runc".into()),
+                binds: Some(vec!["/home/me:/home/me".into()]),
+                memory: Some(1 << 30),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let plan = crate::accel::AccelPlan {
+            runtime: Some("runsc".into()),
+            nvidia_devices: vec!["GPU-a".into()],
+            nvidia_capabilities: Some("compute,utility".into()),
+            cards: vec![crate::accel::CardPlan {
+                pci: "0000:01:00.0".into(),
+                vendor: crate::accel::PCI_NVIDIA.into(),
+                served: true,
+                reason: String::new(),
+            }],
+        };
+        let body = placement_body(&i, "ckpt:flip-accel", &plan);
+        assert_eq!(body.image.as_deref(), Some("ckpt:flip-accel"));
+        assert_eq!(body.cmd, Some(vec!["/init".to_string()]));
+        assert_eq!(
+            body.env,
+            Some(vec![
+                "A=1".to_string(),
+                "NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string()
+            ])
+        );
+        let labels = body.labels.unwrap();
+        assert_eq!(labels["cua.space"], "flip");
+        assert!(labels[LABEL_ACCEL].contains("0000:01:00.0"));
+        let hc = body.host_config.unwrap();
+        assert_eq!(hc.runtime.as_deref(), Some("runsc"));
+        assert_eq!(hc.binds, Some(vec!["/home/me:/home/me".to_string()]));
+        assert_eq!(hc.memory, Some(1 << 30));
+        assert_eq!(
+            hc.device_requests.unwrap()[0].device_ids,
+            Some(vec!["GPU-a".to_string()])
+        );
+        // A card gone: no device request and no capability is left behind.
+        let none = crate::accel::AccelPlan {
+            runtime: Some("runsc".into()),
+            nvidia_devices: vec![],
+            nvidia_capabilities: None,
+            cards: vec![],
+        };
+        let body = placement_body(&i, "ckpt:flip-accel", &none);
+        assert_eq!(body.host_config.unwrap().device_requests, None);
+        assert_eq!(body.env, Some(vec!["A=1".to_string()]));
+    }
+
+    #[test]
+    fn delete_stops_a_running_or_paused_sandbox_in_order_first() {
+        assert!(orderly_stop_first(&Some(Status::Running)));
+        assert!(orderly_stop_first(&Some(Status::Paused)));
+        assert!(!orderly_stop_first(&Some(Status::Stopped)));
+        assert!(!orderly_stop_first(&None));
     }
 
     #[test]
