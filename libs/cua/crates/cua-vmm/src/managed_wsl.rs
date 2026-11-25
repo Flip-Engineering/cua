@@ -35,10 +35,20 @@
 //!   reported with what to turn on ([`classify_failure`]), never "install
 //!   Docker".
 //!
+//! * **gVisor.** Every start of the engine first makes sure gVisor's `runsc`
+//!   is in the distribution ([`gvisor_script`]): the release the Mac's runtime
+//!   pins ([`super::GVISOR_VERSION`]), checked by SHA-512, and registered as
+//!   Docker's runtime `runsc`, so Spaces run under gVisor as on a Mac. A
+//!   distribution set up before this gets it at its next start. When the
+//!   download or the check fails, Docker starts without `runsc` and the reason
+//!   is in `/var/log/cua-gvisor.log`; a host that requires gVisor
+//!   (`CUA_REQUIRE_GVISOR`) then refuses Spaces instead of running them on runc.
+//!
 //! Differences from Docker Desktop: no GUI, no `docker` CLI on the PATH, no
 //! Windows drive mounts in Spaces, and no Kubernetes; from the macOS
-//! runtime: Spaces run under `runc` (no gVisor yet) and the engine's VM is
-//! WSL's, shared with the user's other distributions.
+//! runtime: the engine's VM is WSL's, shared with the user's other
+//! distributions, and a GPU reaches only a runc Space (WSL's `/dev/dxg` has
+//! no gVisor proxy).
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -58,7 +68,19 @@ use crate::host;
 pub const BASE_VERSION: &str = "24.04.5";
 
 /// What the one-time setup installs, from Ubuntu's archive.
-pub const PACKAGES: &str = "docker.io iptables nftables iproute2 socat ca-certificates";
+pub const PACKAGES: &str = "docker.io iptables nftables iproute2 socat ca-certificates curl bzip2";
+
+/// SHA-512 of gVisor's release tarball (`gvisor.tar.bz2`) for
+/// [`super::GVISOR_VERSION`], per architecture, as
+/// `libs/images/runtime-gvisor/versions.env` pins them for the Mac's runtime.
+pub const GVISOR_SHA512_AMD64: &str = "7c899979bed334f0987888c41e545cede8e1f7e67a257978c8de244c3867e32bc30d08491e9af36720273c502acd01d8d86c9844ebcbe125790c43fe6bdf563e";
+pub const GVISOR_SHA512_ARM64: &str = "9438f926b8fadee8c0b8c5c2c954cfc957618acd5d9e1d669e442a9366412dd8794e210b9ce8c7a880a49c8ee9f4f040943a11edae00893d2b22ca844c61de93";
+
+/// Where `runsc` lives in the distribution, per gVisor release (its sidecars
+/// in `gvisor-bin/` beside it, as in gVisor's release tarball).
+pub fn gvisor_dir() -> String {
+    format!("/usr/local/lib/gvisor/{}", super::GVISOR_VERSION)
+}
 
 /// Docker's default bridge, away from WSL's own `172.x` subnets.
 pub const BRIDGE_CIDR: &str = "10.230.0.1/24";
@@ -439,6 +461,48 @@ pub fn daemon_json() -> String {
     )
 }
 
+/// [`daemon_json`] with gVisor's `runsc` registered, with the flags the
+/// container module registers it with elsewhere (`container::gvisor`).
+pub fn daemon_json_with_runsc() -> String {
+    let args = crate::container::gvisor::RUNSC_ARGS
+        .iter()
+        .map(|a| format!("\"{a}\""))
+        .collect::<Vec<_>>()
+        .join(",");
+    let base = daemon_json();
+    format!(
+        "{},\"runtimes\":{{\"runsc\":{{\"path\":\"{}/runsc\",\"runtimeArgs\":[{args}]}}}}}}",
+        &base[..base.len() - 1],
+        gvisor_dir()
+    )
+}
+
+/// Run in the distribution, as root, before Docker starts: installs gVisor
+/// once per release (downloaded, checked by SHA-512, unpacked into a new
+/// directory that takes its place only when whole) and writes Docker's
+/// settings with `runsc` only when `runsc` runs. Its output goes to
+/// `/var/log/cua-gvisor.log`.
+pub fn gvisor_script() -> String {
+    let dir = gvisor_dir();
+    let version = super::GVISOR_VERSION;
+    format!(
+        "set -e\n\
+         exec >>/var/log/cua-gvisor.log 2>&1\n\
+         d={dir}\n\
+         if [ ! -x \"$d/runsc\" ]; then\n\
+         \x20 case \"$(uname -m)\" in x86_64) a=x86_64; s={GVISOR_SHA512_AMD64} ;; aarch64) a=aarch64; s={GVISOR_SHA512_ARM64} ;; *) echo \"no gVisor build for $(uname -m)\"; exit 1 ;; esac\n\
+         \x20 w=/var/cache/cua-gvisor; rm -rf \"$w\" \"$d.new\"; mkdir -p \"$w\" \"$d.new\"\n\
+         \x20 curl -fsSL https://storage.googleapis.com/gvisor/releases/release/{version}/$a/gvisor.tar.bz2 -o \"$w/gvisor.tar.bz2\"\n\
+         \x20 echo \"$s  $w/gvisor.tar.bz2\" | sha512sum -c -\n\
+         \x20 tar -xjf \"$w/gvisor.tar.bz2\" -C \"$d.new\" runsc gvisor-bin\n\
+         \x20 mv \"$d.new\" \"$d\"; rm -rf \"$w\"\n\
+         fi\n\
+         \"$d/runsc\" --version\n\
+         printf '%s' '{}' > /etc/docker/daemon.json\n",
+        daemon_json_with_runsc()
+    )
+}
+
 /// Run in the new distribution, as root: its configuration.
 pub fn configure_script() -> String {
     format!(
@@ -580,6 +644,16 @@ pub async fn unregister(wsl: &dyn Wsl, name: &str) {
 pub async fn start_engine(wsl: &dyn Wsl, name: &str) -> Result<()> {
     if engine_answers(wsl, name).await {
         return Ok(());
+    }
+    // gVisor first; Docker reads its runtimes when it starts.
+    match wsl
+        .run(&exec_args(name, &["sh", "-c", &gvisor_script()]), 600)
+        .await
+    {
+        Ok(out) if out.ok() => {}
+        Ok(_) | Err(_) => tracing::warn!(
+            "gVisor is not ready in the built-in Linux runtime; see /var/log/cua-gvisor.log in {name}"
+        ),
     }
     spawn_engine(name)?;
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(90);
@@ -1089,6 +1163,51 @@ mod tests {
             refuse.contains("refused") && refuse.contains("cua cache prune"),
             "{refuse}"
         );
+    }
+
+    /// The WSL runtime pins the same gVisor release, by the same SHA-512, as
+    /// the Mac's runtime image.
+    #[test]
+    fn gvisor_is_the_pinned_release_of_the_macs_runtime() {
+        let env = include_str!("../../../../images/runtime-gvisor/versions.env");
+        let get = |k: &str| {
+            env.lines()
+                .find_map(|l| l.strip_prefix(&format!("{k}=")))
+                .unwrap_or_else(|| panic!("{k} in versions.env"))
+                .to_string()
+        };
+        assert_eq!(get("GVISOR_VERSION"), super::super::GVISOR_VERSION);
+        assert_eq!(get("GVISOR_SHA512_amd64"), GVISOR_SHA512_AMD64);
+        assert_eq!(get("GVISOR_SHA512_arm64"), GVISOR_SHA512_ARM64);
+        let s = gvisor_script();
+        assert!(
+            s.contains(&format!(
+                "release/{}/$a/gvisor.tar.bz2",
+                super::super::GVISOR_VERSION
+            )),
+            "{s}"
+        );
+        assert!(s.contains("sha512sum -c -"));
+        // The new directory takes the place of the old only when whole.
+        assert!(s.find("sha512sum").unwrap() < s.find("mv \"$d.new\"").unwrap());
+    }
+
+    /// Docker gets `runsc` only from the script that first checked it runs.
+    #[test]
+    fn docker_lists_runsc_only_after_it_runs() {
+        let s = gvisor_script();
+        assert!(s.find("--version").unwrap() < s.find("daemon.json").unwrap());
+        let with: serde_json::Value = serde_json::from_str(&daemon_json_with_runsc()).unwrap();
+        assert_eq!(
+            with["runtimes"]["runsc"]["path"],
+            format!("{}/runsc", gvisor_dir())
+        );
+        assert_eq!(with["runtimes"]["runsc"]["runtimeArgs"][0], "--allow-suid");
+        assert_eq!(with["bip"], BRIDGE_CIDR);
+        let without: serde_json::Value = serde_json::from_str(&daemon_json()).unwrap();
+        assert!(without.get("runtimes").is_none());
+        assert!(configure_script().contains(&daemon_json()));
+        assert!(PACKAGES.contains("curl") && PACKAGES.contains("bzip2"));
     }
 
     #[test]
