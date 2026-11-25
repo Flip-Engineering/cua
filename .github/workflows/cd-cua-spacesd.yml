@@ -682,8 +682,54 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  # Flip's gVisor build (libs/flip-runsc): gVisor's runsc at the release pinned in
+  # libs/flip-runsc/versions.env, plus the NVIDIA driver versions of drivers.json and the
+  # Volta classes. One extra asset per architecture, `flip-runsc-<x86_64|aarch64>.tar.gz`
+  # with a `.sha256` file, listed in SHA256SUMS and signed like the others. Flip's updater
+  # installs it and registers it with the machine's container engine.
+  runsc-linux:
+    needs: version
+    name: flip-runsc linux ${{ matrix.arch }}
+    runs-on: [self-hosted, Linux, X64, docker-linux]
+    timeout-minutes: 60
+    container:
+      image: "debian:12"
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [amd64, arm64]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3 gcc libc6-dev \
+            gcc-aarch64-linux-gnu libc6-dev-arm64-cross
+      - name: Read the Go version of the pinned gVisor
+        id: go
+        run: |
+          set -euo pipefail
+          source libs/flip-runsc/versions.env
+          echo "version=$GO_VERSION" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@4a3601121dd01d1626a1e23e37211e3254c1c06c # v6.4.0
+        with:
+          go-version: ${{ steps.go.outputs.version }}
+          cache: false
+      - name: Build
+        run: bash libs/flip-runsc/build.sh "${{ matrix.arch }}" "$RUNNER_TEMP/flip-runsc" dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: cua-spacesd-flip-runsc-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
   release:
-    needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows, cursor-theme-linux]
+    needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows, cursor-theme-linux, runsc-linux]
     if: needs.version.outputs.publish == 'true'
     runs-on:
       group: baton2-native-homelab
