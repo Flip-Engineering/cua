@@ -19,7 +19,14 @@ unchanged interface. The open and the proprietary module of one release share
 these headers (`src/common/sdk`) and one user-space library.
 
   driver_table.py scan --version-go FILE --nvidia-repo DIR --out drivers.json
+  driver_table.py verify --version-go FILE --nvidia-repo DIR --drivers drivers.json --notes NOTES.md
   driver_table.py go --drivers drivers.json --out version_flip_drivers.go
+  driver_table.py untested --pci-ids pci.ids --out untested.json
+
+`verify` is the release job's gate: it compares every accepted version again
+with its base and fails when an interface header changed; NOTES.md gets one
+paragraph per version for the release notes. `untested` lists the PCI device
+IDs of each card family whose classes Flip added without a run on a card.
 
 `scan` fetches each tag it compares into DIR (a git repository whose origin is
 NVIDIA's). `--checksums` also downloads each accepted release's installer, as
@@ -245,6 +252,79 @@ def go_source(rows):
     return "".join(lines)
 
 
+def verify(version_go, repo, rows, tags=None):
+    """Compares every accepted row again. Returns (failures, notes in Markdown)."""
+    table = known_drivers(version_go)
+    failures, notes = [], []
+    for row in rows:
+        if not row["accepted"]:
+            continue
+        v, base = version(row["version"]), version(row["base"])
+        want = neighbour(v, table)
+        if want != base:
+            failures.append(
+                f"{row['version']}: base is {row['base']}, gVisor's nearest lower version is "
+                f"{show(want) if want else 'none'}"
+            )
+            continue
+        v_tag = next(t for t in tags if version(t) == v) if tags else row["version"]
+        b_tag = next(t for t in tags if version(t) == base) if tags else row["base"]
+        fetch_tag(repo, b_tag)
+        fetch_tag(repo, v_tag)
+        changes = tree_changes(repo, b_tag, v_tag)
+        same, reasons = compare(changes)
+        if not same:
+            failures.extend(f"{row['version']}: {r}" for r in reasons)
+            continue
+        headers = sorted(p for p, _ in changes if p.endswith(HEADER_SUFFIXES))
+        code = sorted(p for p, _ in changes if not p.endswith(HEADER_SUFFIXES))
+        notes.append(
+            f"- **{row['version']}** uses the ABI of {row['base']}. Between the two NVIDIA tags "
+            f"{len(changes)} files changed; no interface header changed. Headers with release lines "
+            f"only: {', '.join(headers) or 'none'}. Other files: {', '.join(code) or 'none'}."
+        )
+    return failures, "\n".join(notes) + ("\n" if notes else "")
+
+
+# Card families whose classes Flip added to gVisor's table without a run on a
+# card (version_flip_volta.go). NVIDIA's chip names begin with the
+# architecture's letters (GV100 is Volta), and pci.ids names the chip of each
+# device ID.
+UNTESTED_FAMILIES = [
+    {
+        "family": "Volta",
+        "chip_prefix": "GV",
+        "classes": [
+            "VOLTA_CHANNEL_GPFIFO_A",
+            "VOLTA_COMPUTE_A",
+            "VOLTA_DMA_COPY_A",
+            "VOLTA_A",
+            "VOLTA_USERMODE_A",
+        ],
+    }
+]
+NVIDIA_VENDOR = "10de"
+PCI_DEVICE = re.compile(r"^\t(?P<id>[0-9a-f]{4})\s+(?P<name>.*)$")
+
+
+def untested(pci_ids, families=UNTESTED_FAMILIES):
+    """The families with the NVIDIA device IDs whose chip name starts with their prefix."""
+    devices, inside = [], False
+    for line in pci_ids.splitlines():
+        if line and not line.startswith(("\t", "#")):
+            inside = line.startswith(NVIDIA_VENDOR + " ")
+            continue
+        m = PCI_DEVICE.match(line) if inside else None
+        if m:
+            devices.append((m["id"], m["name"]))
+    out = []
+    for fam in families:
+        chip = re.compile(re.escape(fam["chip_prefix"]) + r"\d")
+        ids = sorted("0x" + i for i, name in devices if chip.match(name))
+        out.append({**fam, "vendor_id": "0x" + NVIDIA_VENDOR, "device_ids": ids})
+    return out
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -253,6 +333,14 @@ def main(argv=None):
     s.add_argument("--nvidia-repo", required=True)
     s.add_argument("--out", required=True)
     s.add_argument("--checksums", action="store_true")
+    v = sub.add_parser("verify")
+    v.add_argument("--version-go", required=True)
+    v.add_argument("--nvidia-repo", required=True)
+    v.add_argument("--drivers", required=True)
+    v.add_argument("--notes", required=True)
+    u = sub.add_parser("untested")
+    u.add_argument("--pci-ids", required=True)
+    u.add_argument("--out", required=True)
     g = sub.add_parser("go")
     g.add_argument("--drivers", required=True)
     g.add_argument("--out", required=True)
@@ -266,6 +354,23 @@ def main(argv=None):
             f.write("\n")
         accepted = sum(r["accepted"] for r in rows)
         print(f"{accepted} of {len(rows)} unknown releases have a known interface", file=sys.stderr)
+    elif a.cmd == "verify":
+        with open(a.version_go) as f:
+            source = f.read()
+        with open(a.drivers) as f:
+            rows = json.load(f)
+        failures, notes = verify(source, a.nvidia_repo, rows, remote_tags(a.nvidia_repo))
+        with open(a.notes, "w") as f:
+            f.write(notes)
+        for line in failures:
+            print(line, file=sys.stderr)
+        return 1 if failures else 0
+    elif a.cmd == "untested":
+        with open(a.pci_ids, encoding="utf-8", errors="replace") as f:
+            rows = untested(f.read())
+        with open(a.out, "w") as f:
+            json.dump(rows, f, indent=1)
+            f.write("\n")
     else:
         with open(a.drivers) as f:
             rows = json.load(f)

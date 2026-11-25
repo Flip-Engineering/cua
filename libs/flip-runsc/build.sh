@@ -7,9 +7,10 @@
 # The work dir holds the gVisor checkout and Go's caches; it must be on a disk
 # that keeps its contents (never /tmp). The out dir gets
 # flip-runsc-<label>-<x86_64|aarch64>.tar.gz with the layout of gVisor's own release
-# tarball (runsc, containerd-shim-runsc-v1, gvisor-bin/) plus DRIVERS.json and
-# LICENSE. Needs git, go, python3 and a C compiler for the target ($CC, default
-# gcc for amd64 and aarch64-linux-gnu-gcc for arm64).
+# tarball (runsc, containerd-shim-runsc-v1, gvisor-bin/) plus DRIVERS.json,
+# UNTESTED.txt, BULLETINS.txt and LICENSE. Needs git, go, python3 and a C
+# compiler for the target ($CC, default gcc for amd64 and aarch64-linux-gnu-gcc
+# for arm64).
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 arch="${1:?arch}"; work="${2:?work dir}"; out="${3:?out dir}"
@@ -86,13 +87,28 @@ small="-Os -ffreestanding -fno-sanitize=all -fno-stack-protector -fno-asynchrono
 # shellcheck disable=SC2086
 "$cc" $small -no-pie -o "$stage/gvisor-bin/gvisor-sentry-prewarmer" "$src/runsc/prewarmer/prewarmer.c"
 cp "$src/LICENSE" "$stage/LICENSE"
-python3 - "$here/drivers.json" "$stage/DRIVERS.json" "$label" <<'PY'
-import json, sys
-rows = [r for r in json.load(open(sys.argv[1])) if r["accepted"]]
-# Volta: the classes of version_flip_volta.go have not run CUDA on a card yet.
-json.dump({"label": sys.argv[3], "drivers": [{"version": r["version"], "base": r["base"]} for r in rows],
-           "volta_classes": "untested"},
-          open(sys.argv[2], "w"), indent=1)
+# The release job refreshes NVIDIA's bulletins into FLIP_RUNSC_BULLETINS; a local
+# build uses the copy in this directory.
+bulletins="${FLIP_RUNSC_BULLETINS:-$here/bulletins.json}"
+python3 - "$here/drivers.json" "$here/untested.json" "$bulletins" "$stage" "$label" <<'PY'
+import json, os, sys
+sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[1])))
+import bulletins
+drivers, untested, bulletin_file, stage, label = sys.argv[1:]
+rows = [r for r in json.load(open(drivers)) if r["accepted"]]
+families = json.load(open(untested))
+news = json.load(open(bulletin_file))
+# The families of untested.json have classes that have not run CUDA on a card yet.
+json.dump({"label": label, "drivers": [{"version": r["version"], "base": r["base"]} for r in rows],
+           "untested": families, "bulletins": news},
+          open(os.path.join(stage, "DRIVERS.json"), "w"), indent=1)
+# Plain lines for the updater, which runs in sh without a JSON reader.
+with open(os.path.join(stage, "UNTESTED.txt"), "w") as f:
+    for fam in families:
+        for dev in fam["device_ids"]:
+            f.write(f"{fam['vendor_id']} {dev} {fam['family']}\n")
+with open(os.path.join(stage, "BULLETINS.txt"), "w") as f:
+    f.write(bulletins.text(news))
 PY
 if [ "$arch" = "$(go env GOHOSTARCH)" ]; then
   "$stage/runsc" --version | grep -qx "runsc version $label"

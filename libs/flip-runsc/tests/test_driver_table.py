@@ -150,3 +150,48 @@ def test_installer_checksum_is_no_driver_when_nvidia_has_no_installer():
 
     assert dt.installer_sha256("u", missing) == dt.NO_DRIVER
     assert dt.installer_sha256("u", present) == hashlib.sha256(b"installer").hexdigest()
+
+
+TABLE_09 = 'v580_126_09 := addDriverABI(580, 126, 9, "c", "d", v)\n'
+
+
+def test_verify_passes_an_accepted_version_and_writes_its_note(nvidia):
+    rows = [{"version": "580.126.16", "base": "580.126.09", "accepted": True}]
+    failures, notes = dt.verify(TABLE_09, nvidia, rows, dt.remote_tags(nvidia))
+    assert failures == []
+    assert "**580.126.16** uses the ABI of 580.126.09" in notes
+    assert "src/common/inc/nvUnixVersion.h" in notes and "nv.c" in notes
+
+
+def test_verify_fails_when_an_accepted_version_changed_an_interface_header(nvidia):
+    # drivers.json claims .30 is safe; its nvos.h changed, so the release job stops.
+    rows = [{"version": "580.126.30", "base": "580.126.09", "accepted": True}]
+    failures, notes = dt.verify(TABLE_09, nvidia, rows, dt.remote_tags(nvidia))
+    assert any("nvos.h" in f for f in failures)
+    assert notes == ""
+
+
+def test_verify_fails_when_the_base_is_not_gvisors_nearest_version(nvidia):
+    table = TABLE_09 + 'v580_126_12 := addDriverABI(580, 126, 12, "c", "d", v)\n'
+    rows = [{"version": "580.126.16", "base": "580.126.09", "accepted": True}]
+    failures, _ = dt.verify(table, nvidia, rows, dt.remote_tags(nvidia))
+    assert failures and "580.126.12" in failures[0]
+
+
+PCI_IDS = """# comment
+10de  NVIDIA Corporation
+\t1d81  GV100 [TITAN V]
+\t\t10de 1218  TITAN V
+\t1db4  GV100GL [Tesla V100 PCIe 16GB]
+\t1e04  TU102 [GeForce RTX 2080 Ti]
+\t1e05  GVX TU102 mislabel
+10df  Emulex Corporation
+\t1d90  GV100 not NVIDIA
+"""
+
+
+def test_untested_lists_the_family_device_ids_of_nvidia_only():
+    (volta,) = dt.untested(PCI_IDS)
+    assert volta["family"] == "Volta"
+    assert volta["vendor_id"] == "0x10de"
+    assert volta["device_ids"] == ["0x1d81", "0x1db4"]

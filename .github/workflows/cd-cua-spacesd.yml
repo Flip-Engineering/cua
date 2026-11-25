@@ -687,8 +687,55 @@ jobs:
   # Volta classes. One extra asset per architecture, `flip-runsc-<x86_64|aarch64>.tar.gz`
   # with a `.sha256` file, listed in SHA256SUMS and signed like the others. Flip's updater
   # installs it and registers it with the machine's container engine.
-  runsc-linux:
+  # The release gate for Flip's runsc: every NVIDIA driver version that
+  # drivers.json adds to gVisor's table is compared again with its base, and the
+  # job fails when an interface header changed. Its notes go into the release
+  # notes. It also refreshes NVIDIA's security bulletins, which the runsc
+  # tarball carries for the updater.
+  runsc-data:
     needs: version
+    name: flip-runsc driver gate and bulletins
+    runs-on: [self-hosted, Linux, X64, docker-linux]
+    timeout-minutes: 30
+    container:
+      image: "debian:12"
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ needs.version.outputs.ref }}
+      - name: Install dependencies
+        run: |
+          apt-get update
+          apt-get install -y --no-install-recommends ca-certificates git python3
+      - name: Compare every accepted driver version with its base
+        run: |
+          set -euo pipefail
+          source libs/flip-runsc/versions.env
+          mkdir -p runsc-data
+          nvidia="$RUNNER_TEMP/nvidia"
+          git init -q "$nvidia"
+          git -C "$nvidia" remote add origin https://github.com/NVIDIA/open-gpu-kernel-modules.git
+          python3 -c 'import sys, urllib.request; open(sys.argv[2], "wb").write(urllib.request.urlopen(sys.argv[1], timeout=60).read())' \
+            "https://raw.githubusercontent.com/google/gvisor/$GVISOR_RELEASE_COMMIT/pkg/sentry/devices/nvproxy/version.go" \
+            "$RUNNER_TEMP/version.go"
+          python3 libs/flip-runsc/driver_table.py verify --version-go "$RUNNER_TEMP/version.go" \
+            --nvidia-repo "$nvidia" --drivers libs/flip-runsc/drivers.json --notes runsc-data/DRIVER-NOTES.md
+          cat runsc-data/DRIVER-NOTES.md
+      - name: Refresh NVIDIA's driver security bulletins
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 libs/flip-runsc/bulletins.py refresh --out runsc-data/bulletins.json
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: flip-runsc-data
+          path: runsc-data/*
+          if-no-files-found: error
+
+  runsc-linux:
+    needs: [version, runsc-data]
     name: flip-runsc linux ${{ matrix.arch }}
     runs-on: [self-hosted, Linux, X64, docker-linux]
     timeout-minutes: 60
@@ -720,7 +767,13 @@ jobs:
         with:
           go-version: ${{ steps.go.outputs.version }}
           cache: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: flip-runsc-data
+          path: runsc-data
       - name: Build
+        env:
+          FLIP_RUNSC_BULLETINS: runsc-data/bulletins.json
         run: bash libs/flip-runsc/build.sh "${{ matrix.arch }}" "$RUNNER_TEMP/flip-runsc" dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -729,7 +782,7 @@ jobs:
           if-no-files-found: error
 
   release:
-    needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows, cursor-theme-linux, runsc-linux]
+    needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows, cursor-theme-linux, runsc-data, runsc-linux]
     if: needs.version.outputs.publish == 'true'
     runs-on:
       group: baton2-native-homelab
@@ -755,6 +808,10 @@ jobs:
           pattern: signing-*
           path: ${{ steps.paths.outputs.staging }}/signing
           merge-multiple: true
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: flip-runsc-data
+          path: ${{ steps.paths.outputs.staging }}/runsc-data
       - name: Verify checksums and write SHA256SUMS
         working-directory: ${{ steps.paths.outputs.staging }}/release
         run: |
@@ -810,6 +867,17 @@ jobs:
             FLAGS+=(--title "cua-spacesd $VERSION ($label)" --notes-file notes.md)
           fi
           gh release edit "$TAG" "${FLAGS[@]}" --repo "$GITHUB_REPOSITORY"
+          # The driver gate's result per version that Flip's runsc adds.
+          if [ -s runsc-data/DRIVER-NOTES.md ]; then
+            gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json body --jq .body > body.md
+            {
+              echo
+              echo "## Flip's runsc: NVIDIA driver versions added to gVisor's table"
+              echo
+              cat runsc-data/DRIVER-NOTES.md
+            } >> body.md
+            gh release edit "$TAG" --notes-file body.md --repo "$GITHUB_REPOSITORY"
+          fi
           # Release Please's own draft is listed as untagged-<hash>, which the
           # tag lookup above never sees; drop it now that the tagged release is
           # published, or it piles up for good (42 drafts on 8 Nov 2026).
