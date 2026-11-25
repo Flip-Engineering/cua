@@ -195,6 +195,43 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
     }
 }
 
+/// The machine's accelerators as a GPU report row (runtime `machine`): one option
+/// per card, by its PCI address, supported when the plan serves it, with the reason
+/// when not. The existing GPU report carries it to a caller unchanged.
+pub fn machine_support(facts: &MachineFacts) -> crate::gpu::GpuSupport {
+    let planned = plan(facts);
+    let by_pci: BTreeMap<&str, &Card> = facts.cards.iter().map(|c| (c.pci.as_str(), c)).collect();
+    crate::gpu::GpuSupport {
+        runtime: MACHINE.into(),
+        options: planned
+            .cards
+            .iter()
+            .map(|c| {
+                let card = by_pci.get(c.pci.as_str());
+                crate::gpu::GpuOption {
+                    id: c.pci.clone(),
+                    label: format!(
+                        "{} {}{}",
+                        c.vendor,
+                        card.map(|k| k.device.as_str()).unwrap_or(""),
+                        card.and_then(|k| k.uuid.as_deref()).map(|u| format!(" {u}")).unwrap_or_default()
+                    ),
+                    experimental: false,
+                    supported: c.served,
+                    reason: c.reason.clone(),
+                    learn_more: None,
+                    usd_per_hour: None,
+                }
+            })
+            .collect(),
+        reason: if facts.cards.is_empty() {
+            "The machine has no accelerators".into()
+        } else {
+            String::new()
+        },
+    }
+}
+
 /// The driver capabilities a `runsc` entry's arguments allow its GPU proxy.
 pub fn allowed_capabilities(runtime_args: &[String]) -> Vec<String> {
     const FLAG: &str = "--nvproxy-allowed-driver-capabilities";
@@ -424,6 +461,25 @@ mod tests {
         sandbox.driver_capabilities = vec!["compute".into(), "utility".into(), "graphics".into()];
         let p = plan(&linux(vec![nvidia("0000:01:00.0", "GPU-a")], Some(sandbox)));
         assert_eq!(p.nvidia_capabilities.as_deref(), Some("compute,utility,graphics"));
+    }
+
+    #[test]
+    fn the_report_row_names_every_card_served_or_not() {
+        let mut sandbox = gvisor(&["1.2.3"]);
+        sandbox.card_support = Some(BTreeMap::from([
+            ("0000:01:00.0".to_string(), Ok(())),
+            ("0000:02:00.0".to_string(), Err("no classes".to_string())),
+        ]));
+        let row = machine_support(&linux(
+            vec![nvidia("0000:01:00.0", "GPU-a"), nvidia("0000:02:00.0", "GPU-b")],
+            Some(sandbox),
+        ));
+        assert_eq!(row.runtime, MACHINE);
+        assert_eq!(row.options.len(), 2);
+        assert!(row.options[0].supported && row.options[0].label.contains("GPU-a"));
+        assert_eq!((row.options[1].supported, row.options[1].reason.as_str()), (false, "no classes"));
+        let none = machine_support(&linux(vec![], None));
+        assert_eq!(none.reason, "The machine has no accelerators");
     }
 
     #[test]

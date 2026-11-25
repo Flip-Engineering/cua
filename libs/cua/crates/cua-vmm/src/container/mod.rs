@@ -405,6 +405,39 @@ impl ContainerRuntime {
         Ok(v)
     }
 
+    /// What this machine has for "the machine's accelerators" ([`crate::accel`]):
+    /// its PCI accelerators and drivers, and the engine's runtimes by their exact
+    /// names. The gVisor runtime is asked which drivers its GPU proxy supports.
+    pub async fn machine_facts(&self) -> crate::accel::MachineFacts {
+        let runtimes = match self.docker.info().await {
+            Ok(info) => info.runtimes.unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
+        let mut sandbox_runtime = None;
+        if let Some(runsc) = runtimes.get("runsc") {
+            let path = runsc.path.clone().unwrap_or_else(|| "runsc".into());
+            let args = runsc.runtime_args.clone().unwrap_or_default();
+            sandbox_runtime = Some(crate::accel::SandboxRuntime {
+                name: "runsc".into(),
+                supported_drivers: crate::accel::supported_drivers(
+                    &runsc_output(&path, &["nvproxy", "list-supported-drivers"]).await,
+                ),
+                driver_capabilities: crate::accel::allowed_capabilities(&args),
+                card_support: None,
+            });
+        }
+        crate::accel::MachineFacts {
+            os: std::env::consts::OS.into(),
+            cards: crate::accel::cards(
+                std::path::Path::new("/sys"),
+                std::path::Path::new("/proc/driver/nvidia"),
+            ),
+            nvidia_driver: crate::accel::nvidia_driver(std::path::Path::new("/sys")),
+            nvidia_container_runtime: runtimes.contains_key("nvidia"),
+            sandbox_runtime,
+        }
+    }
+
     /// The extra arguments the engine runs runtime `name` with (`None` when
     /// it is not registered).
     pub async fn runtime_args(&self, name: &str) -> Result<Option<Vec<String>>> {
@@ -1270,6 +1303,22 @@ impl Runtime for ContainerRuntime {
     }
 
     async fn start(&self, spec: &StartSpec) -> Result<Instance> {
+        // "The machine's accelerators": the backend places them from what the
+        // machine has (crate::accel) and the caller names no runtime or card.
+        let placed;
+        let spec = if spec.gpu.as_deref() == Some(crate::accel::MACHINE) {
+            let plan = crate::accel::plan(&self.machine_facts().await);
+            let mut s = spec.clone();
+            s.gpu = None;
+            if let Some(runtime) = plan.runtime.clone() {
+                s.container_runtime = Some(runtime);
+            }
+            s.accel = Some(plan);
+            placed = s;
+            &placed
+        } else {
+            spec
+        };
         validate_name(&spec.name)?;
         crate::types::reject_restricted_network(BackendKind::Container, spec)?;
         crate::egress::check(BackendKind::Container, &spec.egress)?;
@@ -3012,6 +3061,18 @@ fn create_body(
     // The caller's labels win (a build container sets `ai.cua.kind=build`,
     // an ephemeral sandbox `ai.cua.ephemeral=true`).
     labels.extend(spec.labels.iter().map(|(k, v)| (k.clone(), v.clone())));
+    // The plan the container was made with: a later start compares it with
+    // the machine's plan then, and the VM's status reads it.
+    if let Some(plan) = &spec.accel {
+        labels.insert(
+            LABEL_ACCEL.into(),
+            serde_json::to_string(&plan.cards).unwrap_or_default(),
+        );
+    }
+    let mut env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    if let Some(caps) = spec.accel.as_ref().and_then(|p| p.nvidia_capabilities.as_ref()) {
+        env.push(format!("NVIDIA_DRIVER_CAPABILITIES={caps}"));
+    }
     let mut bindings = HashMap::new();
     let mut exposed = Vec::new();
     // Sidecars share this container's network namespace, so their ports are
@@ -3035,8 +3096,7 @@ fn create_body(
     }
     ContainerCreateBody {
         image: Some(image.to_string()),
-        env: (!spec.env.is_empty())
-            .then(|| spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
+        env: (!env.is_empty()).then_some(env),
         // `command` replaces the image's ENTRYPOINT and CMD, like a
         // Kubernetes `command`.
         entrypoint: spec.command.clone().filter(|c| !c.is_empty()),
@@ -3149,9 +3209,41 @@ fn apply_wsl_gpu(body: &mut ContainerCreateBody) {
     }
 }
 
+/// How long a runtime's own report may take (`runsc nvproxy list-supported-drivers`
+/// reads a table compiled into the binary). A report that does not come back in
+/// that time counts as no report: the plan then gives the sandbox no card.
+const RUNTIME_REPORT_SECONDS: u64 = 30;
+
+/// One read-only report of the gVisor binary the engine runs, or "" when it fails.
+async fn runsc_output(path: &str, args: &[&str]) -> String {
+    let run = tokio::process::Command::new(path)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(std::time::Duration::from_secs(RUNTIME_REPORT_SECONDS), run).await {
+        Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => String::new(),
+    }
+}
+
+/// The label that records the accelerator plan a container was created with.
+pub const LABEL_ACCEL: &str = "ai.cua.accel";
+
 /// The engine's device requests for [`StartSpec::gpu`]: every NVIDIA GPU
-/// (`--gpus all`) for [`crate::gpu::NVIDIA`].
+/// (`--gpus all`) for [`crate::gpu::NVIDIA`]; the planned cards, by the
+/// driver's ids, for "the machine's accelerators" ([`StartSpec::accel`]).
 fn gpu_requests(spec: &StartSpec) -> Option<Vec<bollard::models::DeviceRequest>> {
+    if let Some(plan) = &spec.accel {
+        return (!plan.nvidia_devices.is_empty()).then(|| {
+            vec![bollard::models::DeviceRequest {
+                driver: Some("nvidia".into()),
+                device_ids: Some(plan.nvidia_devices.clone()),
+                capabilities: Some(vec![vec!["gpu".into()]]),
+                ..Default::default()
+            }]
+        });
+    }
     (spec.gpu.as_deref() == Some(crate::gpu::NVIDIA)).then(|| {
         vec![bollard::models::DeviceRequest {
             driver: Some("nvidia".into()),
@@ -3762,6 +3854,45 @@ mod tests {
         assert_eq!(req[0].driver.as_deref(), Some("nvidia"));
         assert_eq!(req[0].count, Some(-1), "all of them");
         assert_eq!(req[0].capabilities, Some(vec![vec!["gpu".to_string()]]));
+    }
+
+    #[test]
+    fn a_container_with_the_machines_accelerators_asks_for_the_planned_cards_only() {
+        let mut spec = StartSpec::new("sb", ImageSource::Existing);
+        spec.accel = Some(crate::accel::AccelPlan {
+            runtime: Some("runsc".into()),
+            nvidia_devices: vec!["GPU-a".into(), "GPU-b".into()],
+            nvidia_capabilities: Some("compute,utility".into()),
+            cards: vec![crate::accel::CardPlan {
+                pci: "0000:01:00.0".into(),
+                vendor: crate::accel::PCI_NVIDIA.into(),
+                served: true,
+                reason: String::new(),
+            }],
+        });
+        let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
+        let hc = body.host_config.unwrap();
+        let req = hc.device_requests.unwrap();
+        assert_eq!(req[0].device_ids, Some(vec!["GPU-a".to_string(), "GPU-b".to_string()]));
+        assert_eq!(req[0].count, None);
+        assert_eq!(hc.runtime.as_deref(), Some("runsc"));
+        assert!(body.env.unwrap().contains(&"NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string()));
+        assert!(body.labels.unwrap()[LABEL_ACCEL].contains("0000:01:00.0"));
+        // A plan with no served card asks for no device and sets no capability.
+        spec.accel.as_mut().unwrap().nvidia_devices.clear();
+        spec.accel.as_mut().unwrap().nvidia_capabilities = None;
+        let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
+        assert_eq!(body.host_config.unwrap().device_requests, None);
+        assert_eq!(body.env, None);
+    }
+
+    #[test]
+    fn every_backend_accepts_the_machines_accelerators_as_a_need() {
+        let mut spec = StartSpec::new("sb", ImageSource::Existing);
+        spec.gpu = Some(crate::accel::MACHINE.into());
+        for backend in [BackendKind::Container, BackendKind::Qemu, BackendKind::Lume] {
+            assert!(crate::types::reject_gpu(backend, &spec, &[]).is_ok());
+        }
     }
 
     #[tokio::test]

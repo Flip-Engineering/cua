@@ -312,6 +312,10 @@ pub struct StartSpec {
     /// no GPU. A backend refuses one it does not offer.
     #[serde(default)]
     pub gpu: Option<String>,
+    /// The machine's accelerators as the container backend placed them, when
+    /// `gpu` was [`crate::accel::MACHINE`]. Set by the backend, not by a caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accel: Option<crate::accel::AccelPlan>,
     /// The image's layers, `(digest, size)`, when the caller read its
     /// manifest: a pull's progress knows its total and the layers the
     /// engine already has from the start, instead of learning sizes layer
@@ -479,6 +483,7 @@ impl std::fmt::Debug for ClaimIdentity {
 pub fn reject_gpu(backend: BackendKind, spec: &StartSpec, offered: &[&str]) -> crate::Result<()> {
     match spec.gpu.as_deref() {
         None => Ok(()),
+        Some(crate::accel::MACHINE) => Ok(()),
         Some(g) if offered.contains(&g) => Ok(()),
         Some(g) => Err(crate::VmmError::Unsupported {
             backend: backend.as_str(),
@@ -666,6 +671,7 @@ impl StartSpec {
             registry_auth: None,
             container_runtime: None,
             gpu: None,
+            accel: None,
             pull_layers: vec![],
             pull_bytes: None,
             pool_member: false,

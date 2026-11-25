@@ -2648,6 +2648,8 @@ impl LocalRuntime for VmmLocal {
             Ok(Engine::System(rt)) => {
                 out.push(rt.gpu_support_for("container").await);
                 out.push(rt.gpu_support_for("gvisor").await);
+                // The machine's accelerators, each card served or not with the reason.
+                out.push(cua_vmm::accel::machine_support(&rt.machine_facts().await));
             }
             // The built-in runtime's VM has no GPU (and is not booted to
             // say so).
