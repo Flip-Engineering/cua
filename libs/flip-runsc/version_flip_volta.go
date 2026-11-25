@@ -1,0 +1,68 @@
+// Flip's Volta classes for gVisor's GPU proxy. build.sh copies this file into
+// pkg/sentry/devices/nvproxy beside version_flip.go.
+//
+// UNTESTED ON A CARD: nothing in gVisor's own tests or ours has run CUDA on a
+// Volta card through this table. The first real run on a V100 decides whether
+// these classes are enough; until then the machine report says so.
+
+package nvproxy
+
+import "gvisor.dev/gvisor/pkg/abi/nvgpu"
+
+func init() { flipABIWrappers = append(flipABIWrappers, withVolta) }
+
+// Volta classes from NVIDIA's open headers (src/common/sdk/nvidia/inc/class):
+// clc36f.h VOLTA_CHANNEL_GPFIFO_A, clc3c0.h VOLTA_COMPUTE_A, clc3b5.h
+// VOLTA_DMA_COPY_A, clc397.h VOLTA_A. The driver allocates each with the same
+// parameter struct as the Turing class of the same kind
+// (NV_CHANNEL_ALLOC_PARAMS, NV_GR_ALLOCATION_PARAMETERS,
+// NVB0B5_ALLOCATION_PARAMETERS), so each gets the Turing class's handler in
+// every driver ABI. gVisor's table has VOLTA_USERMODE_A for graphics and video
+// only; CUDA on a Volta card maps the doorbell through it, so it also gets
+// TURING_USERMODE_A's capabilities.
+const (
+	voltaChannelGPFIFOA nvgpu.ClassID = 0x0000c36f
+	voltaComputeA       nvgpu.ClassID = 0x0000c3c0
+	voltaDMACopyA       nvgpu.ClassID = 0x0000c3b5
+	voltaA              nvgpu.ClassID = 0x0000c397
+)
+
+var voltaFromTuring = []struct {
+	volta, turing nvgpu.ClassID
+	name          string
+}{
+	{voltaChannelGPFIFOA, nvgpu.TURING_CHANNEL_GPFIFO_A, "VOLTA_CHANNEL_GPFIFO_A"},
+	{voltaComputeA, nvgpu.TURING_COMPUTE_A, "VOLTA_COMPUTE_A"},
+	{voltaDMACopyA, nvgpu.TURING_DMA_COPY_A, "VOLTA_DMA_COPY_A"},
+	{voltaA, nvgpu.TURING_A, "VOLTA_A"},
+	{nvgpu.VOLTA_USERMODE_A, nvgpu.TURING_USERMODE_A, "VOLTA_USERMODE_A"},
+}
+
+// withVolta returns cons whose ABI also allocates the Volta classes.
+func withVolta(cons driverABIFunc) driverABIFunc {
+	return func() *driverABI {
+		abi := cons()
+		for _, c := range voltaFromTuring {
+			turing, ok := abi.allocationClass[c.turing]
+			if !ok {
+				continue
+			}
+			h := turing
+			if existing, ok := abi.allocationClass[c.volta]; ok {
+				h.capSet |= existing.capSet
+			}
+			abi.allocationClass[c.volta] = h
+		}
+		prevGetInfo := abi.getInfo
+		abi.getInfo = func() *DriverABIInfo {
+			info := prevGetInfo()
+			for _, c := range voltaFromTuring {
+				if turing, ok := info.AllocationInfos[c.turing]; ok {
+					info.AllocationInfos[c.volta] = IoctlInfo{Name: c.name, Structs: turing.Structs}
+				}
+			}
+			return info
+		}
+		return abi
+	}
+}

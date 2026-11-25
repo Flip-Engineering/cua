@@ -8,7 +8,8 @@ gVisor's `runsc` at the release in `versions.env`, built from gVisor's `go` bran
   header of NVIDIA's open kernel modules changed between it and its known lower neighbour except
   the version and product-name lines. It then uses that neighbour's ABI, exactly as gVisor chains
   such versions itself.
-- The Volta classes, each with the handler of the Turing class of the same kind.
+- The Volta classes (`version_flip_volta.go`), each with the handler of the Turing class of the
+  same kind. Untested on a card until the first real run on a V100; DRIVERS.json says so.
 
 Refresh the driver list (it fetches the NVIDIA tags it compares into the repository you name, and
 downloads each accepted release's installer to record its SHA-256):

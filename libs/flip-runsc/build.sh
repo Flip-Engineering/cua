@@ -48,7 +48,7 @@ if [ "$gomod" != "$GO_VERSION" ] || [ "$gover" != "go$GO_VERSION" ]; then
 fi
 
 nv="$src/pkg/sentry/devices/nvproxy"
-cp "$here/version_flip.go" "$here/version_flip_test.go" "$nv/"
+cp "$here"/version_flip*.go "$nv/"
 python3 "$here/driver_table.py" go --drivers "$here/drivers.json" --out "$nv/version_flip_drivers.go"
 # Init builds the table inside abisOnce.Do; a deferred call at the top of that
 # function runs after the last entry is added.
@@ -89,7 +89,9 @@ cp "$src/LICENSE" "$stage/LICENSE"
 python3 - "$here/drivers.json" "$stage/DRIVERS.json" "$label" <<'PY'
 import json, sys
 rows = [r for r in json.load(open(sys.argv[1])) if r["accepted"]]
-json.dump({"label": sys.argv[3], "drivers": [{"version": r["version"], "base": r["base"]} for r in rows]},
+# Volta: the classes of version_flip_volta.go have not run CUDA on a card yet.
+json.dump({"label": sys.argv[3], "drivers": [{"version": r["version"], "base": r["base"]} for r in rows],
+           "volta_classes": "untested"},
           open(sys.argv[2], "w"), indent=1)
 PY
 if [ "$arch" = "$(go env GOHOSTARCH)" ]; then
