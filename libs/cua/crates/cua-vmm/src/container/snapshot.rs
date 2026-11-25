@@ -60,8 +60,19 @@ use crate::types::StartSpec;
 
 /// The engine's runtime name of the wrapper.
 pub const WRAPPER_RUNTIME: &str = "cua-runsc";
-/// Where the wrapper is installed in the engine's Linux.
+/// Where the wrapper is installed in the engine's Linux, unless
+/// [`WRAPPER_PATH_ENV`] names another path.
 pub const WRAPPER_PATH: &str = "/usr/local/lib/cua/cua-runsc";
+/// Names the wrapper's path for an engine whose `/usr/local` cua cannot
+/// write, such as a rootless engine run by a service user. The wrapper's
+/// own paths come from [`RUNSC_ENV`], [`STATE_ENV`] and [`STORE_ENV`].
+pub const WRAPPER_PATH_ENV: &str = "CUA_RUNSC_WRAPPER";
+/// The real runsc the wrapper runs.
+pub const RUNSC_ENV: &str = "CUA_RUNSC_BIN";
+/// The wrapper's per-container state directory.
+pub const STATE_ENV: &str = "CUA_RUNSC_STATE";
+/// The engine's checkpoint directory.
+pub const STORE_ENV: &str = "CUA_RUNSC_STORE";
 /// Bumped with every change to `cua-runsc.sh`: an engine with another
 /// version gets this one installed.
 pub const WRAPPER_VERSION: &str = "1";
@@ -81,13 +92,27 @@ pub const TOKEN_KEYS: [&str; 2] = ["CUA_ENV_TOKEN", "CUA_SPACESD_TOKEN"];
 /// cua-spacesd's port.
 pub const SPACESD_PORT: u16 = 3211;
 
-/// The wrapper script for this release.
+/// The wrapper script for this release, with this engine's paths.
 pub fn wrapper_script() -> String {
     render_wrapper(
-        "/usr/local/bin/runsc",
-        "/run/cua-runsc",
-        "/var/lib/docker/cua-runsc",
+        &env_path(RUNSC_ENV, "/usr/local/bin/runsc"),
+        &env_path(STATE_ENV, "/run/cua-runsc"),
+        &env_path(STORE_ENV, "/var/lib/docker/cua-runsc"),
     )
+}
+
+/// Where the wrapper is in the engine's Linux: [`WRAPPER_PATH_ENV`], else
+/// [`WRAPPER_PATH`].
+pub fn wrapper_path() -> String {
+    env_path(WRAPPER_PATH_ENV, WRAPPER_PATH)
+}
+
+/// An absolute path from `key`, else `default`.
+fn env_path(key: &str, default: &str) -> String {
+    std::env::var(key)
+        .ok()
+        .filter(|v| v.starts_with('/'))
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// The wrapper with its paths: the real runsc, its per-container state
@@ -558,8 +583,9 @@ impl Helper {
     /// engine supports.
     pub async fn probe(&self) -> Result<Support> {
         self.ensure().await?;
+        let wrapper = wrapper_path();
         let info = self
-            .run(&[WRAPPER_PATH, "cua", "info"], Duration::from_secs(20))
+            .run(&[&wrapper, "cua", "info"], Duration::from_secs(20))
             .await?;
         let current = (info.code == 0).then(|| parse_info(&info.stdout));
         if let Some(s) =
@@ -569,13 +595,13 @@ impl Helper {
         }
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode(wrapper_script());
-        let dir = WRAPPER_PATH
+        let dir = wrapper
             .rsplit_once('/')
             .map(|(d, _)| d)
             .unwrap_or("/usr/local/lib/cua");
         let script = format!(
-            "set -e; mkdir -p {dir}; printf %s \"$1\" | base64 -d > {WRAPPER_PATH}.new; \
-             chmod 0755 {WRAPPER_PATH}.new; mv {WRAPPER_PATH}.new {WRAPPER_PATH}"
+            "set -e; mkdir -p {dir}; printf %s \"$1\" | base64 -d > {wrapper}.new; \
+             chmod 0755 {wrapper}.new; mv {wrapper}.new {wrapper}"
         );
         self.run_ok(
             &["/bin/sh", "-c", &script, "sh", &b64],
@@ -587,7 +613,7 @@ impl Helper {
             "installed cua-runsc in the engine"
         );
         let info = self
-            .run_ok(&[WRAPPER_PATH, "cua", "info"], Duration::from_secs(20))
+            .run_ok(&[&wrapper, "cua", "info"], Duration::from_secs(20))
             .await?;
         Ok(parse_info(&info))
     }
@@ -595,7 +621,7 @@ impl Helper {
     /// Checkpoints running container `id` into `dir` (it keeps running).
     pub async fn checkpoint(&self, id: &str, dir: &str) -> Result<()> {
         self.run_ok(
-            &[WRAPPER_PATH, "cua", "checkpoint", id, dir],
+            &[&wrapper_path(), "cua", "checkpoint", id, dir],
             Duration::from_secs(600),
         )
         .await
@@ -604,14 +630,16 @@ impl Helper {
 
     /// Forgets deleted containers (the record that they were restored).
     pub async fn forget(&self, ids: &[&str]) -> Result<()> {
-        let mut argv = vec![WRAPPER_PATH, "cua", "forget"];
+        let wrapper = wrapper_path();
+        let mut argv = vec![wrapper.as_str(), "cua", "forget"];
         argv.extend_from_slice(ids);
         self.run_ok(&argv, Duration::from_secs(30)).await.map(drop)
     }
 
     /// Deletes checkpoint directories.
     pub async fn remove(&self, dirs: &[&str]) -> Result<()> {
-        let mut argv = vec![WRAPPER_PATH, "cua", "rm"];
+        let wrapper = wrapper_path();
+        let mut argv = vec![wrapper.as_str(), "cua", "rm"];
         argv.extend_from_slice(dirs);
         self.run_ok(&argv, Duration::from_secs(120)).await.map(drop)
     }
@@ -1169,6 +1197,28 @@ mod tests {
         assert!(pac.memory.unwrap_err().contains("arm64.nopauth"));
         let old = parse_info("version=0\nstore=/s\npac=0\n");
         assert!(old.memory.unwrap_err().contains("is needed"));
+    }
+
+    #[test]
+    fn an_engine_of_a_service_user_names_its_own_wrapper_paths() {
+        // One test owns these variables; no other test sets them.
+        unsafe {
+            std::env::set_var(WRAPPER_PATH_ENV, "/var/lib/flip-vm/runsc/cua-runsc");
+            std::env::set_var(RUNSC_ENV, "/var/lib/flip-vm/runsc/r1/runsc");
+            std::env::set_var(STATE_ENV, "/run/user/998/cua-runsc");
+            std::env::set_var(STORE_ENV, "relative/is/ignored");
+        }
+        let script = wrapper_script();
+        let path = wrapper_path();
+        unsafe {
+            for key in [WRAPPER_PATH_ENV, RUNSC_ENV, STATE_ENV, STORE_ENV] {
+                std::env::remove_var(key);
+            }
+        }
+        assert_eq!(path, "/var/lib/flip-vm/runsc/cua-runsc");
+        assert!(script.contains("RUNSC=/var/lib/flip-vm/runsc/r1/runsc\n"));
+        assert!(script.contains("STATE=/run/user/998/cua-runsc\n"));
+        assert!(script.contains("STORE=/var/lib/docker/cua-runsc\n"));
     }
 
     #[test]
