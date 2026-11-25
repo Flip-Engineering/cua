@@ -33,6 +33,7 @@ pub mod container;
 #[cfg(feature = "containerization")]
 pub mod containerization;
 pub mod density;
+pub mod devwatch;
 pub mod disk;
 pub mod egress;
 pub mod elf;

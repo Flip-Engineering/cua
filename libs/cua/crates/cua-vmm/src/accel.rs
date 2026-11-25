@@ -243,10 +243,14 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
     // with none served now: a card added later shows at the next start (#3282).
     let request = (sandbox.is_some() && facts.nvidia_driver.is_some())
         .then(|| {
-            if facts.nvidia_cdi {
-                Some(StandingRequest::Cdi(NVIDIA_CDI_ALL.into()))
-            } else if facts.nvidia_container_runtime {
+            // The NVIDIA driver request first: under it runsc allows every minor of
+            // the NVIDIA major and lists the gofer's /dev, so a card that arrives
+            // while the Space runs can be opened. Under CDI each device path is
+            // allowed alone at start (runsc/container/devices.go).
+            if facts.nvidia_container_runtime {
                 Some(StandingRequest::NvidiaAll)
+            } else if facts.nvidia_cdi {
+                Some(StandingRequest::Cdi(NVIDIA_CDI_ALL.into()))
             } else {
                 None
             }
@@ -459,9 +463,11 @@ mod tests {
         // No card now: the same request, so a card added later shows at the next start.
         let p = plan(&linux(vec![], Some(gvisor(&["1.2.3"]))));
         assert_eq!(p.request, Some(StandingRequest::NvidiaAll));
-        // A CDI spec for the class wins over the legacy driver.
+        // The NVIDIA driver request wins over CDI; CDI only without the NVIDIA runtime.
         let mut facts = linux(vec![], Some(gvisor(&["1.2.3"])));
         facts.nvidia_cdi = true;
+        assert_eq!(plan(&facts).request, Some(StandingRequest::NvidiaAll));
+        facts.nvidia_container_runtime = false;
         assert_eq!(
             plan(&facts).request,
             Some(StandingRequest::Cdi(NVIDIA_CDI_ALL.into()))
