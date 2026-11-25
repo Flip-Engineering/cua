@@ -22,6 +22,7 @@
 //! what the SDK would provision (e.g. installing `runsc` into a Colima VM,
 //! starting `lume serve`).
 
+pub mod accel;
 pub mod auto;
 pub mod bulk;
 pub mod cleanup;
