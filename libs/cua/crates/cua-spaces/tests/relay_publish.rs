@@ -759,14 +759,21 @@ async fn a_burst_of_200_creates_is_as_fast_and_cheap_for_the_relay() {
 
     // Five seconds later every Space is old enough; the passes finish the job.
     w.age_all();
+    // The bound counts this loop's passes only: the passes that ran beside the burst
+    // grow with how long the burst took, which is the host's load, not the relay's work.
     let mut n_passes = passes.load(Ordering::SeqCst);
+    let mut finishing = 0;
     loop {
         let r = w.spaces.publish_to_relay().await.unwrap();
         n_passes += 1;
+        finishing += 1;
         if r.published.is_empty() && !r.more {
             break;
         }
-        assert!(n_passes < 60, "never finished");
+        assert!(
+            finishing < 60,
+            "never finished: {finishing} passes after the burst"
+        );
     }
     let requests = w.relay.requests();
     let peak = w.relay.peak_in_flight();
