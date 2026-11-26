@@ -2410,8 +2410,14 @@ mod tests {
     /// `CUA_HOME=<tmp> CUA_RUNTIME_LINUX=builtin cargo test -p cua-vmm --lib managed -- --ignored`
     #[cfg(all(feature = "container", feature = "lume", target_os = "macos"))]
     #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "downloads and boots the built-in Linux runtime (network, a VM)"]
+    #[ignore = "boots the built-in Linux runtime (network, a VM); set CUA_VMM_TEST_CONTAINER=1"]
     async fn sets_up_boots_and_removes_the_builtin_runtime() {
+        if !crate::testutil::may_start(
+            "CUA_VMM_TEST_CONTAINER",
+            "sets_up_boots_and_removes_the_builtin_runtime",
+        ) {
+            return;
+        }
         let home = std::env::var("CUA_HOME").expect("set CUA_HOME to a temporary directory");
         assert!(
             !home.is_empty() && !home.ends_with("/.cua"),

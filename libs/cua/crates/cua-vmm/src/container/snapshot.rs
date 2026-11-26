@@ -1414,7 +1414,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn wrapper_restores_an_annotated_container_and_passes_the_rest_through() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let log = d.path().join("argv");
         let fake = d.path().join("runsc");
@@ -1423,7 +1422,7 @@ mod tests {
             format!("#!/bin/sh\necho \"$*\" >> {}\n", log.display()),
         )
         .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::seal_exec(&fake, 0o755);
         let w = d.path().join("cua-runsc");
         let state = d.path().join("state");
         std::fs::write(
@@ -1435,7 +1434,7 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&w, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::seal_exec(&w, 0o755);
         let bundle = d.path().join("bundle");
         std::fs::create_dir_all(&bundle).unwrap();
         let run = |args: &[&str]| {

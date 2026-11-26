@@ -1753,25 +1753,68 @@ mod tests {
     }
 
     /// The cheap `/proc/<pid>/status` counters report what `smaps_rollup`
-    /// does (which walks the page tables), and see touched memory.
+    /// does (which walks the page tables), and see touched memory. Measured on a
+    /// child process that holds only the ballast: the test process itself has other
+    /// tests allocating and freeing memory between the two reads.
     #[test]
     #[cfg(target_os = "linux")]
     fn private_memory_from_status_matches_smaps() {
-        let mut ballast = vec![0u8; 96 << 20];
-        for p in ballast.iter_mut().step_by(4096) {
-            *p = 1;
+        use std::io::{BufRead, Write};
+        let mut child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "density::tests::private_memory_ballast_child",
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env("CUA_DENSITY_BALLAST", "1")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut out = std::io::BufReader::new(child.stdout.take().unwrap());
+        let mut line = String::new();
+        // libtest prints the child's line after its own "test <name> ... ".
+        while !line.trim_end().ends_with("ballast ready") {
+            line.clear();
+            assert!(
+                out.read_line(&mut line).unwrap() > 0,
+                "the child ended before its ballast"
+            );
         }
-        let pid = std::process::id();
+        let pid = child.id();
         let fast = process_private_mb(pid).unwrap();
         let t = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).unwrap();
         let slow = (imp::kb_for_test(&t, "Anonymous:").unwrap()
             + imp::kb_for_test(&t, "Swap:").unwrap_or(0))
             / 1024;
+        // Closing its stdin lets the child end.
+        child.stdin.take().unwrap().flush().unwrap();
+        assert!(child.wait().unwrap().success());
         assert!(fast >= 90, "touched 96 MiB, measured {fast}");
         assert!(
             fast.abs_diff(slow) <= 24,
             "status {fast} MiB vs smaps_rollup {slow} MiB"
         );
+    }
+
+    /// The child of [`private_memory_from_status_matches_smaps`]: touches 96 MiB, says
+    /// so, and holds it until its stdin closes. Without its variable it does nothing.
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn private_memory_ballast_child() {
+        use std::io::{Read, Write};
+        if std::env::var_os("CUA_DENSITY_BALLAST").is_none() {
+            return;
+        }
+        let mut ballast = vec![0u8; 96 << 20];
+        for p in ballast.iter_mut().step_by(4096) {
+            *p = 1;
+        }
+        println!("ballast ready");
+        std::io::stdout().flush().unwrap();
+        let mut rest = Vec::new();
+        let _ = std::io::stdin().read_to_end(&mut rest);
         std::hint::black_box(&ballast);
     }
 

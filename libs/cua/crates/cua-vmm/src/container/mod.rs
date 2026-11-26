@@ -4344,8 +4344,14 @@ mod tests {
     /// names, so no GPU is needed. The container starts with one device, stops,
     /// the spec grows to two, and the same container (same id) starts with two.
     #[tokio::test]
-    #[ignore = "starts a container; needs an engine with CDI (see the doc comment)"]
+    #[ignore = "starts a container; set CUA_VMM_TEST_CONTAINER=1, needs an engine with CDI (see the doc comment)"]
     async fn the_same_container_sees_the_devices_of_each_start() {
+        if !crate::testutil::may_start(
+            "CUA_VMM_TEST_CONTAINER",
+            "the_same_container_sees_the_devices_of_each_start",
+        ) {
+            return;
+        }
         let dir = std::path::PathBuf::from(
             std::env::var("CUA_TEST_CDI_DIR")
                 .expect("CUA_TEST_CDI_DIR names a CDI directory the engine reads"),

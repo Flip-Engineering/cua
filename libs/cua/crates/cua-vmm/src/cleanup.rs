@@ -13,7 +13,8 @@ use std::time::Duration;
 
 type Done = futures::future::Shared<futures::channel::oneshot::Receiver<()>>;
 
-static PENDING: Mutex<Vec<Done>> = Mutex::new(Vec::new());
+/// Each clean-up with the thread that started it (see [`settle`]).
+static PENDING: Mutex<Vec<(std::thread::ThreadId, Done)>> = Mutex::new(Vec::new());
 
 /// Runs `fut` on the current tokio runtime and remembers it for [`settle`].
 /// Outside a runtime (a guard dropped at process exit) nothing runs.
@@ -29,8 +30,8 @@ where
             let _ = tx.send(());
         });
         let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-        pending.retain(|d| d.peek().is_none());
-        pending.push(rx.shared());
+        pending.retain(|(_, d)| d.peek().is_none());
+        pending.push((std::thread::current().id(), rx.shared()));
     }
 }
 
@@ -41,8 +42,15 @@ where
 pub async fn settle(budget: Duration) -> bool {
     let waits: Vec<Done> = {
         let mut pending = PENDING.lock().unwrap_or_else(|e| e.into_inner());
-        pending.retain(|d| d.peek().is_none());
-        pending.clone()
+        pending.retain(|(_, d)| d.peek().is_none());
+        // A unit test waits for its own clean-up only: every #[tokio::test] runs on its own
+        // thread, and another test's clean-up, still running beside it, is not its own.
+        let here = std::thread::current().id();
+        pending
+            .iter()
+            .filter(|(thread, _)| !cfg!(test) || *thread == here)
+            .map(|(_, d)| d.clone())
+            .collect()
     };
     tokio::time::timeout(budget, futures::future::join_all(waits))
         .await

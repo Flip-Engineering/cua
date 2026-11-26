@@ -1737,12 +1737,11 @@ mod tests {
     #[cfg(all(unix, feature = "qemu"))]
     #[tokio::test]
     async fn the_namespace_probe_reads_pastas_own_refusal() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let fake = |name: &str, body: &str| {
             let p = dir.path().join(name);
             std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::testutil::seal_exec(&p, 0o755);
             p
         };
         let denies = fake(

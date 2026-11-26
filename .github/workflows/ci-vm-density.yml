@@ -125,6 +125,8 @@ jobs:
           export CUA_VMM_TEST_DISK="$HOME/.cache/cua-images-e2e/linux/amd64/disk.img"
           cargo test --locked -p cua-daemon --test qemu_density -- --ignored --nocapture --test-threads=1
           cargo test --locked -p cua-daemon --test qemu_resize -- --ignored --nocapture
+          cargo test --locked -p cua-vmm --lib -- --ignored --exact \
+            qemu::tests::claimed_pool_member_can_migrate_its_memory_to_a_file --nocapture
       - name: Build the CLI and rollout_bench
         if: ${{ !cancelled() }}
         working-directory: libs/cua

@@ -1087,7 +1087,6 @@ mod tests {
     /// before it parses `--version`).
     #[cfg(unix)]
     fn recording_lume(dir: &Path) -> (PathBuf, PathBuf) {
-        use std::os::unix::fs::PermissionsExt;
         std::fs::create_dir_all(dir).unwrap();
         let bin = dir.join("lume");
         let seen = dir.join("seen");
@@ -1101,7 +1100,7 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::seal_exec(&bin, 0o755);
         (bin, seen)
     }
 

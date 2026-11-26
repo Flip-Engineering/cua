@@ -4666,6 +4666,9 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn live_tpm_vm_refusals() {
+        // The fake VM has no network namespace, as a VM of the open (legacy) mode; under the
+        // secure default its open policy would mean a relaunch, which needs a QMP port.
+        let _mode = crate::network::hold_mode(crate::network::Mode::Legacy);
         let tmp = tempfile::tempdir().unwrap();
         let Some(r) = tpm_runtime(tmp.path()).await else {
             return;
@@ -5781,7 +5784,14 @@ mod tests {
     /// `qemu-system-x86_64` and `qemu-img` (KVM when present, else TCG).
     #[cfg(all(unix, target_arch = "x86_64"))]
     #[tokio::test]
+    #[ignore = "starts a QEMU VM; set CUA_VMM_TEST_QEMU=1 and run with --ignored"]
     async fn claimed_pool_member_can_migrate_its_memory_to_a_file() {
+        if !crate::testutil::may_start(
+            "CUA_VMM_TEST_QEMU",
+            "claimed_pool_member_can_migrate_its_memory_to_a_file",
+        ) {
+            return;
+        }
         if img::qemu_img().is_err() || host::which("qemu-system-x86_64").is_none() {
             eprintln!("qemu missing; skipping");
             return;

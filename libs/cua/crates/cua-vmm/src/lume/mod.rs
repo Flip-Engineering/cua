@@ -3398,7 +3398,6 @@ mod tests {
     /// `LUME_HOME` for VMs; named `lume-local` it follows it (#5804).
     #[cfg(unix)]
     fn fake_lume_named(name: &str, dir: &std::path::Path, stable_dir: &std::path::Path) -> PathBuf {
-        use std::os::unix::fs::PermissionsExt;
         let follows_lume_home = name == CuaChannel::Local.lume_bin_name();
         let bin = dir.join(name);
         std::fs::write(
@@ -3432,7 +3431,7 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::seal_exec(&bin, 0o755);
         bin
     }
 
@@ -3640,7 +3639,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cli_status_runs_lume_get() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let bin = dir.path().join("lume");
         std::fs::write(
@@ -3649,7 +3647,7 @@ mod tests {
              echo '[{\"name\":\"cua-box\",\"status\":\"stopped\"}]'\n",
         )
         .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::seal_exec(&bin, 0o755);
         assert_eq!(
             cli_status(&LumeCmd::plain(&bin), "cua-box").await.unwrap(),
             Status::Stopped
@@ -4473,7 +4471,6 @@ mod tests {
     #[cfg(unix)]
     #[tokio::test]
     async fn cli_pull_passes_credentials_in_the_environment_only() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("out");
         let bin = dir.path().join("lume");
@@ -4486,7 +4483,7 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::seal_exec(&bin, 0o755);
         let creds = RegistryCredentials::new("me", "s3cret");
         cli_pull(
             &LumeCmd::plain(&bin),

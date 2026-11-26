@@ -872,7 +872,6 @@ mod tests {
     /// whether it restarted the unit.
     #[cfg(unix)]
     fn guarded_restart_fires(ci: &str, up: &str) -> bool {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("log");
         let fake = dir.path().join("systemctl");
@@ -884,7 +883,7 @@ mod tests {
             ),
         )
         .unwrap();
-        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::seal_exec(&fake, 0o755);
         let path = format!(
             "{}:{}",
             dir.path().display(),

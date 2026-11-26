@@ -41,7 +41,7 @@ async fn daemon_script_success_failure_and_force_stop() {
             }
         };
         std::fs::write(&tpm, body).unwrap();
-        std::fs::set_permissions(&tpm, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::testutil::seal_exec(&tpm, 0o700);
         let output = tokio::time::timeout(
             Duration::from_secs(4),
             tokio::process::Command::new("/bin/sh")
@@ -177,7 +177,7 @@ fn launch_once_wiring() {
         } {
             let path = bin.join(name);
             std::fs::write(&path, "#!/bin/sh\nexit 1\n").unwrap();
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            crate::testutil::seal_exec(path, 0o700);
         }
         let output = std::process::Command::new(std::env::current_exe().unwrap())
             // These tests are about launching QEMU, not the network gateway the secure default puts a VM behind.
@@ -520,7 +520,7 @@ fn cancelled_launch(late: bool) {
     let exe = |name: &str, body: String| {
         let path = bin.join(name);
         std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::testutil::seal_exec(path, 0o700);
     };
     exe(
         "qemu-system-aarch64",
@@ -821,7 +821,7 @@ fn failed_start_holds_the_vm_through_its_cleanup() {
     let exe = |name: &str, body: String| {
         let path = bin.join(name);
         std::fs::write(&path, body).unwrap();
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        crate::testutil::seal_exec(path, 0o700);
     };
     exe(
         "swtpm",

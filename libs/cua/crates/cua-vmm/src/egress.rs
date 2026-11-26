@@ -2130,7 +2130,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn ns_script_runs_against_the_tools() {
-        use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let log = dir.path().join("calls");
         for (name, target) in [("sh", "/bin/sh"), ("cat", "/bin/cat")] {
@@ -2153,7 +2152,7 @@ mod tests {
                 ),
             )
             .unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::testutil::seal_exec(&path, 0o755);
         }
         let r = rules(&["1.1.1.1"], &["all"]);
         let out = std::process::Command::new("/bin/sh")

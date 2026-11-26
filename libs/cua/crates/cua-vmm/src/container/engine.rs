@@ -418,7 +418,6 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_binary_names_its_engine() {
-        use std::os::unix::fs::PermissionsExt;
         let d = tempfile::tempdir().unwrap();
         let bin = d.path().join("docker");
         std::fs::write(
@@ -426,7 +425,7 @@ mod tests {
             "#!/bin/sh\n[ \"$1 $2\" = \"context inspect\" ] && echo /Users/me/.orbstack/run/docker.sock\n",
         )
         .unwrap();
-        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::testutil::seal_exec(&bin, 0o755);
         assert_eq!(
             endpoint_of_binary(&bin).as_deref(),
             Some("unix:///Users/me/.orbstack/run/docker.sock")

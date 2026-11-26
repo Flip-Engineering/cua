@@ -70,6 +70,8 @@ pub mod runtime;
 pub mod screen;
 pub mod stack;
 pub mod storage;
+#[cfg(test)]
+pub(crate) mod testutil;
 pub mod tree;
 pub mod types;
 #[cfg(feature = "vnc")]

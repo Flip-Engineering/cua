@@ -787,9 +787,9 @@ fn net_helpers() {
 
 #[test]
 fn vms_forward_listed_localhost_ports_only() {
-    if Mode::from_env() == Mode::Legacy {
-        return;
-    }
+    // The secure default's rules, held for this test, so a test that holds the open mode beside
+    // it cannot change them halfway (crate::network::hold_mode).
+    let _mode = hold_mode(Mode::Secure);
     assert_eq!(vm_localhost_ports(None).unwrap(), Vec::<u16>::new());
     assert_eq!(
         vm_localhost_ports(Some(&NetworkSettings::internet())).unwrap(),
@@ -1259,9 +1259,9 @@ fn localhost_lan_children_keep_only_the_extras_both_open() {
 
 #[test]
 fn vms_forward_localhost_lan_ports_too() {
-    if Mode::from_env() == Mode::Legacy {
-        return;
-    }
+    // The secure default's rules, held for this test, so a test that holds the open mode beside
+    // it cannot change them halfway (crate::network::hold_mode).
+    let _mode = hold_mode(Mode::Secure);
     assert_eq!(
         vm_localhost_ports(Some(&both(&[3000, 5432]))).unwrap(),
         [3000, 5432]
