@@ -512,6 +512,7 @@ impl ContainerRuntime {
             ),
             nvidia_driver: crate::accel::nvidia_driver(std::path::Path::new("/sys")),
             nvidia_container_runtime: runtimes.contains_key("nvidia"),
+            flip_cdi: crate::cdiclass::dir().is_some(),
             nvidia_cdi: crate::accel::has_nvidia_cdi(&[
                 std::path::Path::new("/etc/cdi"),
                 std::path::Path::new("/var/run/cdi"),
@@ -1390,6 +1391,7 @@ impl Runtime for ContainerRuntime {
         let placed;
         let spec = if spec.gpu.as_deref() == Some(crate::accel::MACHINE) {
             let plan = crate::accel::plan(&self.machine_facts().await);
+            write_class(&plan);
             let mut s = spec.clone();
             s.gpu = None;
             if let Some(runtime) = plan.runtime.clone() {
@@ -1748,6 +1750,10 @@ impl Runtime for ContainerRuntime {
             .await?
             .ok_or_else(|| VmmError::NotFound(name.into()))?;
         if Self::status_from(&before) == Status::Stopped {
+            // A personal Space starts with the machine's cards of now.
+            if keeps_programs_when_running(&before) || is_space(&before) {
+                write_class(&crate::accel::plan(&self.machine_facts().await));
+            }
             if self.needs_recreate(name, &before) {
                 // Recreating it would drop its writable layer: never done for you.
                 return Err(VmmError::invalid(format!(
@@ -3364,6 +3370,26 @@ const CUDA_CHECKPOINT_PATH: &str = "/usr/local/bin/cuda-checkpoint";
 /// Names cuda-checkpoint's path inside a Space.
 const CUDA_CHECKPOINT_ENV: &str = "CUA_CUDA_CHECKPOINT";
 
+/// Rewrites the Space's CDI class from a plan's served cards, when the VM
+/// service keeps one. A failure is logged: the engine then reads the class as
+/// it was, and the Space starts with the cards of the last write.
+fn write_class(plan: &crate::accel::AccelPlan) {
+    if let Some(dir) = crate::cdiclass::dir() {
+        let served = plan.served().filter_map(|c| c.minor).collect();
+        if let Err(e) = crate::cdiclass::write(&dir, &served) {
+            tracing::warn!(error = %e, dir = %dir.display(), "could not write the Space's accelerator class");
+        }
+    }
+}
+
+/// Whether a container is a personal Space.
+fn is_space(i: &bollard::models::ContainerInspectResponse) -> bool {
+    i.config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref())
+        .is_some_and(|l| crate::accel::is_personal(l.iter()))
+}
+
 /// Whether a stopped container is a personal Space under the wrapper (one
 /// whose start may resume its saved programs).
 fn keeps_programs_when_running(i: &bollard::models::ContainerInspectResponse) -> bool {
@@ -4042,6 +4068,7 @@ mod tests {
                 vendor: crate::accel::PCI_NVIDIA.into(),
                 served: true,
                 reason: String::new(),
+                minor: Some(0),
             }],
         });
         let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());

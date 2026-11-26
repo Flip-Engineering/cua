@@ -35,6 +35,8 @@ microvm = [
 ]
 
 [dependencies]
+# Reads NVIDIA's CDI spec and writes the Space's accelerator class (cdiclass.rs).
+serde_yaml_ng = "0.10"
 cua-microvm-init = { workspace = true, optional = true }
 cua-spacesd-client = { workspace = true, optional = true }
 pbjson-types = { workspace = true, optional = true }
@@ -80,8 +82,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Network
 cua-spacesd-client.workspace = true
 tempfile = "3"
 tokio = { version = "1", features = ["full"] }
-# Reads Local's `config.yaml` back with a real YAML parser (same version as cua-agent-setup).
-serde_yaml_ng = "0.10"
 # Property tests of the network model (fail closed, tree intersection).
 proptest = "1"
 

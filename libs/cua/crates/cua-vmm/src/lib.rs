@@ -25,6 +25,7 @@
 pub mod accel;
 pub mod auto;
 pub mod bulk;
+pub mod cdiclass;
 pub mod cleanup;
 pub mod cloudinit;
 pub mod conformance;

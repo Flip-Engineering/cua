@@ -43,6 +43,9 @@ pub struct Card {
     /// The vendor driver's id for it (NVIDIA: the GPU UUID), if the driver reports one.
     #[serde(default)]
     pub uuid: Option<String>,
+    /// Its device minor (NVIDIA: the N of `/dev/nvidia<N>`), if the driver reports one.
+    #[serde(default)]
+    pub minor: Option<u32>,
 }
 
 /// What the sandbox runtime (gVisor's `runsc`) says about itself on this machine.
@@ -77,6 +80,10 @@ pub struct MachineFacts {
     /// The machine has a CDI spec for NVIDIA's device class ([`NVIDIA_CDI_ALL`]).
     #[serde(default)]
     pub nvidia_cdi: bool,
+    /// The VM service keeps the Space's own CDI class ([`crate::cdiclass`]) in a
+    /// directory the engine reads.
+    #[serde(default)]
+    pub flip_cdi: bool,
     /// gVisor, when the engine registers it.
     #[serde(default)]
     pub sandbox_runtime: Option<SandboxRuntime>,
@@ -91,6 +98,9 @@ pub struct CardPlan {
     /// Why it is not served (empty when served). `unverified` notes go here too.
     #[serde(default)]
     pub reason: String,
+    /// The card's device minor, when the driver reports one.
+    #[serde(default)]
+    pub minor: Option<u32>,
 }
 
 /// The placement of a sandbox that uses the machine's accelerators.
@@ -177,6 +187,7 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
     let mut nvidia_devices = Vec::new();
     for card in &facts.cards {
         let refuse = |reason: String| CardPlan {
+            minor: card.minor,
             pci: card.pci.clone(),
             vendor: card.vendor.clone(),
             served: false,
@@ -223,6 +234,7 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
                     support => {
                         nvidia_devices.push(card.uuid.clone().expect("checked above"));
                         CardPlan {
+                            minor: card.minor,
                             pci: card.pci.clone(),
                             vendor: card.vendor.clone(),
                             served: true,
@@ -239,23 +251,23 @@ pub fn plan(facts: &MachineFacts) -> AccelPlan {
         };
         cards.push(decided);
     }
-    // One standing request whenever the sandbox can take NVIDIA cards at all, also
-    // with none served now: a card added later shows at the next start (#3282).
-    let request = (sandbox.is_some() && facts.nvidia_driver.is_some())
-        .then(|| {
-            // The NVIDIA driver request first: under it runsc allows every minor of
-            // the NVIDIA major and lists the gofer's /dev, so a card that arrives
-            // while the Space runs can be opened. Under CDI each device path is
-            // allowed alone at start (runsc/container/devices.go).
-            if facts.nvidia_container_runtime {
-                Some(StandingRequest::NvidiaAll)
-            } else if facts.nvidia_cdi {
-                Some(StandingRequest::Cdi(NVIDIA_CDI_ALL.into()))
-            } else {
-                None
-            }
-        })
-        .flatten();
+    // One standing request whenever the sandbox can take a card at all, also
+    // with none served now (#3282). The Space's own CDI class first: it names
+    // no vendor, exists from the first start, and the VM service writes it from
+    // the machine's served cards at each start and device event.
+    let request = if sandbox.is_some() && facts.flip_cdi {
+        Some(StandingRequest::Cdi(crate::cdiclass::CLASS_ALL.into()))
+    } else if sandbox.is_some() && facts.nvidia_driver.is_some() {
+        if facts.nvidia_container_runtime {
+            Some(StandingRequest::NvidiaAll)
+        } else if facts.nvidia_cdi {
+            Some(StandingRequest::Cdi(NVIDIA_CDI_ALL.into()))
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let nvidia_capabilities = request.as_ref().map(|_| {
         let allowed = &sandbox
             .expect("a request implies a sandbox")
@@ -395,11 +407,17 @@ pub fn cards(sys: &Path, proc_nvidia: &Path) -> Vec<Card> {
             names.sort();
             names.first().map(|n| format!("/dev/dri/{n}"))
         });
-        let uuid =
-            read(&proc_nvidia.join("gpus").join(&pci).join("information")).and_then(|info| {
-                info.lines()
-                    .find_map(|l| l.strip_prefix("GPU UUID:").map(|v| v.trim().to_string()))
-            });
+        let info = read(&proc_nvidia.join("gpus").join(&pci).join("information"));
+        let uuid = info.as_deref().and_then(|info| {
+            info.lines()
+                .find_map(|l| l.strip_prefix("GPU UUID:").map(|v| v.trim().to_string()))
+        });
+        let minor = info.as_deref().and_then(|info| {
+            info.lines().find_map(|l| {
+                l.strip_prefix("Device Minor:")
+                    .and_then(|v| v.trim().parse().ok())
+            })
+        });
         found.push(Card {
             pci,
             vendor: read(&dev.join("vendor")).unwrap_or_default(),
@@ -407,6 +425,7 @@ pub fn cards(sys: &Path, proc_nvidia: &Path) -> Vec<Card> {
             driver,
             render_node,
             uuid,
+            minor,
         });
     }
     found
@@ -429,6 +448,7 @@ mod tests {
             driver: Some("nvidia".into()),
             render_node: None,
             uuid: Some(uuid.into()),
+            minor: None,
         }
     }
 
@@ -448,6 +468,7 @@ mod tests {
             nvidia_driver: Some("1.2.3".into()),
             nvidia_container_runtime: true,
             nvidia_cdi: false,
+            flip_cdi: false,
             sandbox_runtime: sandbox,
         }
     }
@@ -602,6 +623,7 @@ mod tests {
             driver: Some("amdgpu".into()),
             render_node: Some("/dev/dri/renderD129".into()),
             uuid: None,
+            minor: None,
         };
         let p = plan(&linux(
             vec![amd, nvidia("0000:01:00.0", "GPU-a")],
