@@ -895,7 +895,7 @@ impl super::ContainerRuntime {
             return None;
         }
         let sup = self.support().await;
-        if !sup.ok() {
+        if !sup.ok() || self.root_writes_on_disk().await {
             return None;
         }
         // Ready = a TCP listener: the probes', else cua-spacesd's.

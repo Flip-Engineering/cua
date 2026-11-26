@@ -428,6 +428,18 @@ impl ContainerRuntime {
         }
     }
 
+    /// Whether `script` exits 0 in the Space, run as root (false when it cannot run).
+    async fn guest_ok(&self, name: &str, script: &str) -> bool {
+        let req = crate::exec::ExecRequest {
+            user: Some("0".into()),
+            ..crate::exec::ExecRequest::sh(script).timeout(std::time::Duration::from_secs(20))
+        };
+        matches!(
+            crate::exec::GuestExec::exec(&self.exec_handle(name), req).await,
+            Ok(out) if out.exit_code == 0
+        )
+    }
+
     /// Saves a running personal Space with its programs into its one
     /// checkpoint directory and ends it; its next start resumes it. A Space
     /// whose sandbox asks for GPUs passes cuda-checkpoint's path in the Space
@@ -448,9 +460,26 @@ impl ContainerRuntime {
             .as_ref()
             .and_then(|h| h.device_requests.as_ref())
             .is_some_and(|r| !r.is_empty());
-        let cuda = gpu.then(|| {
+        let mut cuda = gpu.then(|| {
             std::env::var(CUDA_CHECKPOINT_ENV).unwrap_or_else(|_| CUDA_CHECKPOINT_PATH.into())
         });
+        if let Some(path) = cuda.clone() {
+            // Without NVIDIA's cuda-checkpoint in the Space, a save would drop the GPU
+            // state of a program that holds a card and restore it broken: then the
+            // Space takes the cold path. With no program on a card, it saves without
+            // the CUDA step.
+            if !self
+                .guest_ok(name, &format!("test -x {}", sh_quote(&path)))
+                .await
+            {
+                if self.guest_ok(name, HOLDS_A_CARD).await {
+                    return Err(VmmError::other(
+                        "a program in the Space holds a GPU and cuda-checkpoint is not in the Space",
+                    ));
+                }
+                cuda = None;
+            }
+        }
         for sc in self.sidecar_names(name).await? {
             let opts = StopContainerOptions {
                 t: Some(self.cfg.stop_timeout),
@@ -530,6 +559,22 @@ impl ContainerRuntime {
             .unwrap_or_default()
             .remove(name)
             .map(|r| r.runtime_args.unwrap_or_default()))
+    }
+
+    /// Whether the engine's gVisor runtimes keep root writes on the container's
+    /// disk (`--overlay2=none`) instead of in the sandbox's overlay. Then a
+    /// memory checkpoint holds memory only, and a clone restored from it would
+    /// find its source's files missing: no golden start, memory fork or memory
+    /// checkpoint is made (a refused clone is better than a wrong disk).
+    pub async fn root_writes_on_disk(&self) -> bool {
+        for name in ["runsc", snapshot::WRAPPER_RUNTIME] {
+            if let Ok(Some(args)) = self.runtime_args(name).await
+                && overlay_off(&args)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Decide `runsc` vs `runc`, provisioning gVisor when permitted.
@@ -1817,6 +1862,7 @@ impl Runtime for ContainerRuntime {
             && Self::under_wrapper(i)
             && Self::status_from(i) == Status::Running
             && self.support().await.ok()
+            && !self.root_writes_on_disk().await
         {
             let rec = self
                 .mem_checkpoint(source, i, &format!("fork-{new_name}"))
@@ -1890,6 +1936,7 @@ impl Runtime for ContainerRuntime {
         if Self::under_wrapper(&i)
             && Self::status_from(&i) == Status::Running
             && self.support().await.ok()
+            && !self.root_writes_on_disk().await
         {
             // Memory and the root overlay, in well under a second.
             let mut rec = self
@@ -3365,6 +3412,14 @@ fn refuse_personal_fork(source: &str, labels: &HashMap<String, String>) -> Resul
     Ok(())
 }
 
+/// Exits 0 when a process in the Space has a GPU card file open.
+const HOLDS_A_CARD: &str = "for fd in /proc/[0-9]*/fd/*; do case \"$(readlink \"$fd\" 2>/dev/null)\" in /dev/nvidia[0-9]*) exit 0 ;; esac; done; exit 1";
+
+/// A string as one single-quoted shell word.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
 /// Where cuda-checkpoint is inside a Space unless `CUA_CUDA_CHECKPOINT` says.
 const CUDA_CHECKPOINT_PATH: &str = "/usr/local/bin/cuda-checkpoint";
 /// Names cuda-checkpoint's path inside a Space.
@@ -3388,6 +3443,15 @@ fn is_space(i: &bollard::models::ContainerInspectResponse) -> bool {
         .as_ref()
         .and_then(|c| c.labels.as_ref())
         .is_some_and(|l| crate::accel::is_personal(l.iter()))
+}
+
+/// Whether runsc arguments turn the root overlay off (`--overlay2=none`,
+/// also as two words).
+fn overlay_off(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--overlay2=none")
+        || args
+            .windows(2)
+            .any(|w| w[0] == "--overlay2" && w[1] == "none")
 }
 
 /// Whether a stopped container is a personal Space under the wrapper (one
@@ -4299,6 +4363,24 @@ mod tests {
             snapshot::WRAPPER_RUNTIME,
             false
         )));
+    }
+
+    #[test]
+    fn the_overlay_is_off_only_with_overlay2_none() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(overlay_off(&args(&["--nvproxy", "--overlay2=none"])));
+        assert!(overlay_off(&args(&["--overlay2", "none"])));
+        assert!(!overlay_off(&args(&["--overlay2=root:self"])));
+        assert!(!overlay_off(&args(&[])));
+    }
+
+    #[test]
+    fn shell_quoting_keeps_a_path_one_word() {
+        assert_eq!(
+            sh_quote("/usr/local/bin/cuda-checkpoint"),
+            "'/usr/local/bin/cuda-checkpoint'"
+        );
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
     }
 
     #[test]
