@@ -920,6 +920,10 @@ jobs:
         run: |
           set -euo pipefail
           for sum in *.sha256; do sha256sum -c "$sum"; done
+          # NVIDIA's driver bulletins this release's runsc was built with, as an asset of its
+          # own under the signed sums: Flip's server tells an owner of a driver fix only when
+          # the fix is in this list.
+          cp ../runsc-data/bulletins.json flip-runsc-bulletins.json
           find . -maxdepth 1 -type f ! -name '*.sha256' ! -name SHA256SUMS -printf '%f\n' | sort | xargs sha256sum > SHA256SUMS
           sha256sum -c SHA256SUMS
           for f in SHA256SUMS $(awk '{print $2}' SHA256SUMS); do
