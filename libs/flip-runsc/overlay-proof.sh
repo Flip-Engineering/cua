@@ -69,7 +69,10 @@ check() { # runtime -> prints "<kept after restart> <in export>"
   d start "$name" >/dev/null
   [ "$(d inspect --format '{{.Id}}' "$name")" = "$id" ] || { echo "the container id changed" >&2; exit 1; }
   kept=no; d exec "$name" cat "$proof" 2>/dev/null | grep -qx kept && kept=yes
-  exported=no; d export "$name" | tar -t | grep -qx "${proof#/}" && exported=yes
+  # The listing goes to a file first: with pipefail, grep -q ending at the first match
+  # kills tar with SIGPIPE and the pipeline fails, so a found file read as "no".
+  d export "$name" | tar -t >"$work/export-$1.txt"
+  exported=no; grep -qx "${proof#/}" "$work/export-$1.txt" && exported=yes
   d rm -f "$name" >/dev/null
   echo "$kept $exported"
 }

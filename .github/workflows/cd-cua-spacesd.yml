@@ -235,11 +235,14 @@ jobs:
           if-no-files-found: error
       # The container runs as root and shares the work folder with the jobs that run on
       # the host as the runner's user. Every file goes back to that user, or the next host
-      # job's checkout cannot empty the folder and fails.
+      # job's checkout cannot empty the folder and fails. A network namespace file an
+      # inner engine left bound in the folder (nsfs) cannot change owner and is skipped.
       - &give_back_work_folder
         name: Give the work folder back to the runner's user
         if: always()
-        run: chown -hR "$(stat -c %u:%g "$RUNNER_WORKSPACE")" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+        run: >-
+          find "$GITHUB_WORKSPACE" "$RUNNER_TEMP" ! -fstype nsfs
+          -exec chown -h "$(stat -c %u:%g "$RUNNER_WORKSPACE")" {} +
 
   macos:
     needs: version
