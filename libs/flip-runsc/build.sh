@@ -57,6 +57,10 @@ for p in "$here"/patches/*.patch; do
 done
 nv="$src/pkg/sentry/devices/nvproxy"
 cp "$here"/version_flip*.go "$nv/"
+# riff-one-vm's GPU device refresh: every card number of the NVIDIA major is
+# allowed under the proxy, and `runsc nvproxy refresh <cid>` brings a running
+# Space's /dev/nvidia<N> to the cards its gofer has.
+python3 "$here/apply_refresh.py" "$src"
 python3 "$here/driver_table.py" go --drivers "$here/drivers.json" --out "$nv/version_flip_drivers.go"
 # Init builds the table inside abisOnce.Do; a deferred call at the top of that
 # function runs after the last entry is added.
@@ -72,7 +76,7 @@ PY
 gofmt -l "$nv" | (! grep .)
 
 export CGO_ENABLED=0 GOFLAGS=-trimpath GOCACHE="$work/go-cache" GOMODCACHE="$work/go-mod"
-(cd "$src" && go test -count=1 ./pkg/sentry/devices/nvproxy/)
+(cd "$src" && go test -count=1 ./pkg/sentry/devices/nvproxy/ && go test -count=1 -run Flip ./runsc/boot/)
 
 stage="$work/stage-$triple"
 rm -rf "$stage" && mkdir -p "$stage/gvisor-bin"
