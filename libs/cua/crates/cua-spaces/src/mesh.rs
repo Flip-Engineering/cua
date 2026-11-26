@@ -821,14 +821,16 @@ mod tests {
 
         let (n, spaces) = clients.shed_forwards().await;
         assert_eq!((n, spaces), (1, vec!["relay:m1".to_owned()]));
-        // The forward's port is closed; the Space is no longer routed.
-        assert!(tokio::net::TcpStream::connect(route.local).await.is_err());
+        // The Space is no longer routed.
         assert!(clients.routed.lock().unwrap().is_empty());
-        // The next route opens a fresh forward.
+        // The forward is gone: the next route opens a fresh one, with its own session key.
+        // (A connect to the old port proves nothing: once freed, another test may bind it.)
         let again = dialer
             .route("m1", None, Duration::from_secs(10))
             .await
             .unwrap();
+        assert!(route.session.is_some());
+        assert_ne!(again.session, route.session);
         assert!(tokio::net::TcpStream::connect(again.local).await.is_ok());
         machine.shutdown();
     }
