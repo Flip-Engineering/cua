@@ -233,6 +233,13 @@ jobs:
           name: cua-spacesd-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+      # The container runs as root and shares the work folder with the jobs that run on
+      # the host as the runner's user. Every file goes back to that user, or the next host
+      # job's checkout cannot empty the folder and fails.
+      - &give_back_work_folder
+        name: Give the work folder back to the runner's user
+        if: always()
+        run: chown -R "$(stat -c %u:%g "$RUNNER_WORKSPACE")" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
   macos:
     needs: version
@@ -574,6 +581,7 @@ jobs:
           name: cua-spacesd-cli-${{ matrix.target }}
           path: dist/*
           if-no-files-found: error
+      - *give_back_work_folder
 
   cua-cli-macos:
     needs: version
@@ -730,6 +738,7 @@ jobs:
   # job fails when an interface header changed. Its notes go into the release
   # notes. It also refreshes NVIDIA's security bulletins, which the runsc
   # tarball carries for the updater.
+      - *give_back_work_folder
   runsc-data:
     needs: version
     name: flip-runsc driver gate and bulletins
@@ -775,6 +784,7 @@ jobs:
   # Flip's QEMU: QEMU with virglrenderer and Venus, for the KVM guest kind on
   # Linux computers whose GPU has no gVisor proxy. Built on the oldest C library
   # the runner image has; VERSIONS in the tarball names the oldest glibc it needs.
+      - *give_back_work_folder
   qemu-linux:
     needs: version
     name: flip-qemu linux x86_64
@@ -803,6 +813,7 @@ jobs:
           name: cua-spacesd-flip-qemu-x86_64
           path: dist/*
           if-no-files-found: error
+      - *give_back_work_folder
 
   runsc-linux:
     needs: [version, runsc-data]
@@ -854,6 +865,7 @@ jobs:
   # Flip's runsc keeps a Space's root filesystem writes across a stop and a
   # start (--overlay2=none, as Flip's updater registers it): a gate for the
   # release. It runs its own dockerd, so it needs a privileged container.
+      - *give_back_work_folder
   runsc-overlay-proof:
     needs: [version, runsc-linux]
     name: flip-runsc keeps root writes
@@ -883,6 +895,7 @@ jobs:
           mkdir -p runsc
           tar -xzf runsc-dist/flip-runsc-*-x86_64.tar.gz -C runsc
           bash libs/flip-runsc/overlay-proof.sh runsc "$RUNNER_TEMP/overlay-proof"
+      - *give_back_work_folder
 
   release:
     needs: [version, check-version, linux, macos, windows, cua-cli-linux, cua-cli-macos, cua-cli-windows, cursor-theme-linux, runsc-data, runsc-linux, runsc-overlay-proof, qemu-linux]
