@@ -30,6 +30,16 @@ cat >"$work/daemon.json" <<JSON
   }
 }
 JSON
+# In a container on a cgroup v2 host this shell's processes sit in the namespace's root
+# cgroup, where no controller can be turned on for children ("device or resource
+# busy"), so the engine could not give a sandbox its cgroup. As docker:dind does, move
+# them into a child cgroup first and turn the controllers on for the root. Only inside a
+# container (its own cgroup namespace): on a host this would move the host's processes.
+if [ -f /.dockerenv ] && [ -f /sys/fs/cgroup/cgroup.controllers ] && [ -w /sys/fs/cgroup/cgroup.subtree_control ]; then
+  mkdir -p /sys/fs/cgroup/init
+  while read -r pid; do echo "$pid" >/sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true; done </sys/fs/cgroup/cgroup.procs
+  sed -e "s/ / +/g" -e "s/^/+/" </sys/fs/cgroup/cgroup.controllers >/sys/fs/cgroup/cgroup.subtree_control
+fi
 dockerd --config-file "$work/daemon.json" --data-root "$work/data" --exec-root "$work/exec" \
   --host "$sock" --pidfile "$work/dockerd.pid" >"$work/dockerd.log" 2>&1 &
 d() { docker --host "$sock" "$@"; }
