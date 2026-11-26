@@ -2648,6 +2648,8 @@ impl LocalRuntime for VmmLocal {
             Ok(Engine::System(rt)) => {
                 out.push(rt.gpu_support_for("container").await);
                 out.push(rt.gpu_support_for("gvisor").await);
+                // The machine's accelerators, each card served or not with the reason.
+                out.push(cua_vmm::accel::machine_support(&rt.machine_facts().await));
             }
             // The built-in runtime's VM has no GPU (and is not booted to
             // say so).
@@ -2702,6 +2704,8 @@ impl LocalRuntime for VmmLocal {
             .pool
             .get()
             .filter(|_| spec.warm != Some(false) && !injected)
+            // A personal Space is one machine that lives for years: never a pool member's body.
+            .filter(|_| !personal_space(&s))
             .filter(|_| s.egress.is_empty() || backend != BackendKind::Qemu);
         if self.pool.get().is_some() && pool.is_none() {
             tracing::debug!(name = spec.name, warm = ?spec.warm, injected, "warm pool: not asked for this create");
@@ -4074,6 +4078,13 @@ async fn build_with(
 /// Whether `backend`'s `Runtime::claim` delivers the Space's token to the
 /// guest itself (a microVM over vsock, a QEMU VM through its token file), so
 /// the pool secret no longer opens it and is never presented to it.
+/// Whether a start is a personal Space's: it states "the machine's accelerators",
+/// the need only a personal Space states (`cua_vmm::accel::LABEL_SPACE`).
+fn personal_space(s: &cua_vmm::StartSpec) -> bool {
+    s.gpu.as_deref() == Some(cua_vmm::accel::MACHINE)
+        || cua_vmm::accel::is_personal(s.labels.iter())
+}
+
 fn claim_delivers_token(backend: BackendKind) -> bool {
     matches!(
         backend,

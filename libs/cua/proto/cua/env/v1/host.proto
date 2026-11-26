@@ -340,6 +340,19 @@ message SetHostSpacePowerResponse {
   string power = 2;
   // What happened, for people.
   string message = 3;
+  // Set when a Space saved with its programs started fresh instead (its disk
+  // changed after the save): the programs that were running were not kept.
+  FreshStart fresh_start = 4;
+}
+
+// A Space that started fresh, not with the programs it was saved with.
+message FreshStart {
+  // Why, as one code of a closed list: "disk_changed" (the disk changed after
+  // the save), "save_unverified" (the save has no disk generation to compare)
+  // or "restore_failed" (the restore of the saved programs failed).
+  string reason = 1;
+  // When it started, in seconds since the Unix epoch.
+  int64 at_unix = 2;
 }
 
 // Jobs on a host: each runs once in a fresh Space that the host creates,

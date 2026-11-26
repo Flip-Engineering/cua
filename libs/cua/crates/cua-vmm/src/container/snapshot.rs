@@ -75,7 +75,7 @@ pub const STATE_ENV: &str = "CUA_RUNSC_STATE";
 pub const STORE_ENV: &str = "CUA_RUNSC_STORE";
 /// Bumped with every change to `cua-runsc.sh`: an engine with another
 /// version gets this one installed.
-pub const WRAPPER_VERSION: &str = "1";
+pub const WRAPPER_VERSION: &str = "4";
 /// The OCI annotation naming the checkpoint a container restores on start.
 pub const ANNOTATION_RESTORE: &str = "ai.cua.restore";
 /// The privileged helper container (one per engine).
@@ -628,6 +628,25 @@ impl Helper {
         .map(drop)
     }
 
+    /// Saves running container `id` into `dir` and ends it; its next start
+    /// restores it (`cua suspend`). `cuda`: cuda-checkpoint's path inside the
+    /// container, for a Space whose programs may hold GPU state.
+    pub async fn suspend(&self, id: &str, dir: &str, cuda: Option<&str>) -> Result<()> {
+        let mut argv = vec![WRAPPER_PATH, "cua", "suspend", id, dir];
+        argv.extend(cuda);
+        self.run_ok(&argv, Duration::from_secs(600)).await.map(drop)
+    }
+
+    /// Why suspended container `id` last started cold, cleared once read
+    /// (`None` when it resumed with its programs or was not suspended).
+    pub async fn cold(&self, id: &str) -> Result<Option<String>> {
+        let out = self
+            .run_ok(&[WRAPPER_PATH, "cua", "cold", id], Duration::from_secs(30))
+            .await?;
+        let reason = out.trim();
+        Ok((!reason.is_empty()).then(|| reason.to_string()))
+    }
+
     /// Forgets deleted containers (the record that they were restored).
     pub async fn forget(&self, ids: &[&str]) -> Result<()> {
         let wrapper = wrapper_path();
@@ -898,6 +917,9 @@ impl super::ContainerRuntime {
         reference: &str,
     ) -> Option<GoldenPlan> {
         if !self.cfg.warm
+            // A personal Space boots from its own disk, never from a shared golden checkpoint.
+            || spec.accel.is_some()
+            || crate::accel::is_personal(spec.labels.iter())
             || !spec.sidecars.is_empty()
             || spec.gpu.is_some()
             || spec.restrict_network
@@ -911,7 +933,7 @@ impl super::ContainerRuntime {
             return None;
         }
         let sup = self.support().await;
-        if !sup.ok() {
+        if !sup.ok() || self.root_writes_on_disk().await {
             return None;
         }
         // Ready = a TCP listener: the probes', else cua-spacesd's.
@@ -1181,6 +1203,111 @@ impl GoldenJob {
 
 #[cfg(test)]
 mod tests {
+
+    /// A suspended Space resumes with its programs only on the disk it was saved
+    /// with: the wrapper records the disk's generation when the engine deletes the
+    /// saved container, and a changed (or unknown) generation starts it cold.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_suspended_space_resumes_only_on_the_disk_it_was_saved_with() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let (state, store, bundle) = (base.join("state"), base.join("store"), base.join("bundle"));
+        std::fs::create_dir_all(store.join(".resume")).unwrap();
+        std::fs::create_dir_all(bundle.join("rootfs/etc")).unwrap();
+        std::fs::write(
+            bundle.join("config.json"),
+            r#"{"ociVersion":"1.0.2","root":{"path":"rootfs","readonly":false}}"#,
+        )
+        .unwrap();
+        std::fs::write(bundle.join("rootfs/etc/a"), "hello\n").unwrap();
+        let runsc = base.join("runsc");
+        std::fs::write(&runsc, "#!/bin/sh\nexit 0\n").unwrap();
+        std::os::unix::fs::PermissionsExt::set_mode(
+            &mut std::fs::metadata(&runsc).unwrap().permissions(),
+            0o755,
+        );
+        Command::new("chmod")
+            .arg("755")
+            .arg(&runsc)
+            .status()
+            .unwrap();
+        let wrapper = base.join("w");
+        std::fs::write(
+            &wrapper,
+            render_wrapper(
+                runsc.to_str().unwrap(),
+                state.to_str().unwrap(),
+                store.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("sh")
+                    .arg(&wrapper)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let b = bundle.to_str().unwrap();
+        let save = || {
+            std::fs::write(
+                store.join(".resume/c1"),
+                store.join("img").to_str().unwrap(),
+            )
+            .unwrap()
+        };
+        let restores = || state.join("c1.restore").exists();
+
+        run(&["create", "--bundle", b, "c1"]);
+        save();
+        run(&["delete", "c1"]);
+        assert!(store.join(".resume/c1.gen").exists());
+        run(&["create", "--bundle", b, "c1"]);
+        assert!(restores(), "the same disk resumes the programs");
+
+        run(&["delete", "c1"]);
+        run(&["create", "--bundle", b, "c1"]);
+        save();
+        run(&["delete", "c1"]);
+        std::fs::write(bundle.join("rootfs/etc/a"), "changed\n").unwrap();
+        run(&["create", "--bundle", b, "c1"]);
+        assert!(!restores(), "a changed disk starts cold");
+        let out = Command::new("sh")
+            .arg(&wrapper)
+            .args(["cua", "cold", "c1"])
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "disk_changed");
+        let again = Command::new("sh")
+            .arg(&wrapper)
+            .args(["cua", "cold", "c1"])
+            .output()
+            .unwrap();
+        assert!(again.stdout.is_empty(), "the reason is read once");
+
+        // A save with no disk generation to compare starts cold too, and says so.
+        run(&["delete", "c1"]);
+        run(&["create", "--bundle", b, "c1"]);
+        save();
+        run(&["delete", "c1"]);
+        std::fs::remove_file(store.join(".resume/c1.gen")).unwrap();
+        run(&["create", "--bundle", b, "c1"]);
+        assert!(!restores(), "an unverified save starts cold");
+        let out = Command::new("sh")
+            .arg(&wrapper)
+            .args(["cua", "cold", "c1"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "save_unverified"
+        );
+    }
     use super::*;
 
     #[test]

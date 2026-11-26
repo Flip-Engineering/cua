@@ -22,8 +22,10 @@
 //! what the SDK would provision (e.g. installing `runsc` into a Colima VM,
 //! starting `lume serve`).
 
+pub mod accel;
 pub mod auto;
 pub mod bulk;
+pub mod cdiclass;
 pub mod cleanup;
 pub mod cloudinit;
 pub mod conformance;
@@ -32,6 +34,7 @@ pub mod container;
 #[cfg(feature = "containerization")]
 pub mod containerization;
 pub mod density;
+pub mod devwatch;
 pub mod disk;
 pub mod egress;
 pub mod elf;

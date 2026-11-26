@@ -11,6 +11,7 @@
 //!
 //! [`DockerExec`] is the agentless guest-exec path for containers.
 
+pub mod cardsync;
 pub mod egress;
 pub mod engine;
 pub mod gvisor;
@@ -173,6 +174,41 @@ pub struct ContainerRuntime {
     engine_cpus: Mutex<Option<i64>>,
     /// Memory checkpoints on this engine ([`snapshot`]), probed once.
     snap: tokio::sync::OnceCell<snapshot::Support>,
+}
+
+/// A Space saved with its programs that started fresh instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreshStart {
+    /// Why, as one code of a closed list: `disk_changed` (the disk changed after
+    /// the save), `save_unverified` (the save has no disk generation to compare)
+    /// or `restore_failed` (the restore of the saved programs failed).
+    pub reason: String,
+    /// When it started, in seconds since the Unix epoch.
+    pub at_unix: i64,
+}
+
+/// Fresh starts not yet told, by Space name.
+static START_NOTES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, FreshStart>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Notes that Space `name` started fresh, for `reason` (a code, see [`FreshStart`]).
+fn note_fresh_start(name: &str, reason: String) {
+    let at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    START_NOTES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(name.to_string(), FreshStart { reason, at_unix });
+}
+
+/// Takes Space `name`'s fresh start, once (`None` when it resumed or was not saved).
+pub fn take_start_note(name: &str) -> Option<FreshStart> {
+    START_NOTES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(name)
 }
 
 /// The OOM score adjustment of a Space's container (higher dies first).
@@ -405,6 +441,202 @@ impl ContainerRuntime {
         Ok(v)
     }
 
+    /// The orderly stop: SIGTERM, then `stop_timeout` seconds before SIGKILL.
+    async fn stop_plain(&self, name: &str) -> Result<()> {
+        for sc in self.sidecar_names(name).await? {
+            let opts = StopContainerOptions {
+                t: Some(self.cfg.stop_timeout),
+                signal: None,
+            };
+            let _ = self.docker.stop_container(&sc, Some(opts)).await;
+        }
+        let opts = StopContainerOptions {
+            t: Some(self.cfg.stop_timeout),
+            signal: None,
+        };
+        match self.docker.stop_container(name, Some(opts)).await {
+            Ok(()) => Ok(()),
+            Err(e) if is_not_found(&e) => Err(VmmError::NotFound(name.into())),
+            Err(bollard::errors::Error::DockerResponseServerError {
+                status_code: 304, ..
+            }) => Ok(()),
+            Err(e) => Err(engine_err(e)),
+        }
+    }
+
+    /// Copies NVIDIA's cuda-checkpoint from the host (`CUA_CUDA_CHECKPOINT_HOST`) into
+    /// the running Space at `path` when the Space lacks it. A copy, not a bind: a
+    /// Space made before the owner's acceptance gets it at its next save too. The
+    /// file goes in under a temporary name and is renamed, so a half copy never runs.
+    async fn offer_cuda_checkpoint(&self, name: &str, path: &str) {
+        let Ok(host) = std::env::var(CUDA_CHECKPOINT_HOST_ENV) else {
+            return;
+        };
+        let Ok(binary) = tokio::fs::read(&host).await else {
+            return;
+        };
+        if self
+            .guest_ok(name, &format!("test -x {}", sh_quote(path)))
+            .await
+        {
+            return;
+        }
+        let (dest, part) = (sh_quote(path), sh_quote(&format!("{path}.part")));
+        let script = format!(
+            "set -e; mkdir -p \"$(dirname {dest})\"; cat > {part}; chmod 0755 {part}; mv -f {part} {dest}"
+        );
+        let req = crate::exec::ExecRequest {
+            user: Some("0".into()),
+            ..crate::exec::ExecRequest::sh(script)
+                .stdin(binary)
+                .timeout(std::time::Duration::from_secs(120))
+        };
+        match crate::exec::GuestExec::exec(&self.exec_handle(name), req).await {
+            Ok(out) if out.exit_code == 0 => {}
+            Ok(out) => tracing::warn!(
+                name,
+                code = out.exit_code,
+                "cuda-checkpoint could not be copied into the Space"
+            ),
+            Err(e) => {
+                tracing::warn!(name, error = %e, "cuda-checkpoint could not be copied into the Space")
+            }
+        }
+    }
+
+    /// Whether `script` exits 0 in the Space, run as root (false when it cannot run).
+    async fn guest_ok(&self, name: &str, script: &str) -> bool {
+        let req = crate::exec::ExecRequest {
+            user: Some("0".into()),
+            ..crate::exec::ExecRequest::sh(script).timeout(std::time::Duration::from_secs(20))
+        };
+        matches!(
+            crate::exec::GuestExec::exec(&self.exec_handle(name), req).await,
+            Ok(out) if out.exit_code == 0
+        )
+    }
+
+    /// Saves a running personal Space with its programs into its one
+    /// checkpoint directory and ends it; its next start resumes it. A Space
+    /// whose sandbox asks for GPUs passes cuda-checkpoint's path in the Space
+    /// (`CUA_CUDA_CHECKPOINT`), so CUDA programs keep their GPU state.
+    async fn suspend_space(
+        &self,
+        name: &str,
+        i: &bollard::models::ContainerInspectResponse,
+    ) -> Result<()> {
+        let sup = self.support().await.clone();
+        sup.memory.clone().map_err(VmmError::other)?;
+        let id =
+            i.id.clone()
+                .ok_or_else(|| VmmError::NotFound(name.into()))?;
+        let dir = Self::snap_dir(&sup, &format!("space-{name}"));
+        let gpu = i
+            .host_config
+            .as_ref()
+            .and_then(|h| h.device_requests.as_ref())
+            .is_some_and(|r| !r.is_empty());
+        let mut cuda = gpu.then(|| {
+            std::env::var(CUDA_CHECKPOINT_ENV).unwrap_or_else(|_| CUDA_CHECKPOINT_PATH.into())
+        });
+        if let Some(path) = cuda.clone() {
+            self.offer_cuda_checkpoint(name, &path).await;
+            // Without NVIDIA's cuda-checkpoint in the Space, a save would drop the GPU
+            // state of a program that holds a card and restore it broken: then the
+            // Space takes the cold path. With no program on a card, it saves without
+            // the CUDA step.
+            if !self
+                .guest_ok(name, &format!("test -x {}", sh_quote(&path)))
+                .await
+            {
+                if self.guest_ok(name, HOLDS_A_CARD).await {
+                    return Err(VmmError::other(
+                        "a program in the Space holds a GPU and cuda-checkpoint is not in the Space",
+                    ));
+                }
+                cuda = None;
+            }
+        }
+        for sc in self.sidecar_names(name).await? {
+            let opts = StopContainerOptions {
+                t: Some(self.cfg.stop_timeout),
+                signal: None,
+            };
+            let _ = self.docker.stop_container(&sc, Some(opts)).await;
+        }
+        let started = std::time::Instant::now();
+        self.helper().suspend(&id, &dir, cuda.as_deref()).await?;
+        tracing::info!(
+            name,
+            ms = started.elapsed().as_millis() as u64,
+            cuda = cuda.is_some(),
+            "Space saved with its programs"
+        );
+        // The sandbox has ended; the engine sees the container stop.
+        let _ = self
+            .docker
+            .wait_container(
+                name,
+                None::<bollard::query_parameters::WaitContainerOptions>,
+            )
+            .next()
+            .await;
+        Ok(())
+    }
+
+    /// What this machine has for "the machine's accelerators" ([`crate::accel`]):
+    /// its PCI accelerators and drivers, and the engine's runtimes by their exact
+    /// names. The gVisor runtime is asked which drivers its GPU proxy supports.
+    pub async fn machine_facts(&self) -> crate::accel::MachineFacts {
+        machine_facts_of(&self.docker).await
+    }
+}
+
+/// The machine's accelerator facts, read through engine `docker` and the host's
+/// /sys and /proc (never nvidia-smi).
+pub(crate) async fn machine_facts_of(docker: &Docker) -> crate::accel::MachineFacts {
+    {
+        let runtimes = match docker.info().await {
+            Ok(info) => info.runtimes.unwrap_or_default(),
+            Err(_) => Default::default(),
+        };
+        let mut sandbox_runtime = None;
+        // cua-runsc is runsc that can also save a Space with its programs and
+        // resume it: a personal Space runs under it when the engine has it.
+        let entry = [snapshot::WRAPPER_RUNTIME, "runsc"]
+            .into_iter()
+            .find_map(|name| runtimes.get(name).map(|r| (name, r)));
+        if let Some((name, runsc)) = entry {
+            let path = runsc.path.clone().unwrap_or_else(|| name.into());
+            let args = runsc.runtime_args.clone().unwrap_or_default();
+            sandbox_runtime = Some(crate::accel::SandboxRuntime {
+                name: name.into(),
+                supported_drivers: crate::accel::supported_drivers(
+                    &runsc_output(&path, &["nvproxy", "list-supported-drivers"]).await,
+                ),
+                driver_capabilities: crate::accel::allowed_capabilities(&args),
+                card_support: None,
+            });
+        }
+        crate::accel::MachineFacts {
+            os: std::env::consts::OS.into(),
+            cards: crate::accel::cards(
+                std::path::Path::new("/sys"),
+                std::path::Path::new("/proc/driver/nvidia"),
+            ),
+            nvidia_driver: crate::accel::nvidia_driver(std::path::Path::new("/sys")),
+            nvidia_container_runtime: runtimes.contains_key("nvidia"),
+            flip_cdi: crate::cdiclass::dir().is_some(),
+            nvidia_cdi: crate::accel::has_nvidia_cdi(&[
+                std::path::Path::new("/etc/cdi"),
+                std::path::Path::new("/var/run/cdi"),
+            ]),
+            sandbox_runtime,
+        }
+    }
+}
+
+impl ContainerRuntime {
     /// The extra arguments the engine runs runtime `name` with (`None` when
     /// it is not registered).
     pub async fn runtime_args(&self, name: &str) -> Result<Option<Vec<String>>> {
@@ -414,6 +646,22 @@ impl ContainerRuntime {
             .unwrap_or_default()
             .remove(name)
             .map(|r| r.runtime_args.unwrap_or_default()))
+    }
+
+    /// Whether the engine's gVisor runtimes keep root writes on the container's
+    /// disk (`--overlay2=none`) instead of in the sandbox's overlay. Then a
+    /// memory checkpoint holds memory only, and a clone restored from it would
+    /// find its source's files missing: no golden start, memory fork or memory
+    /// checkpoint is made (a refused clone is better than a wrong disk).
+    pub async fn root_writes_on_disk(&self) -> bool {
+        for name in ["runsc", snapshot::WRAPPER_RUNTIME] {
+            if let Ok(Some(args)) = self.runtime_args(name).await
+                && overlay_off(&args)
+            {
+                return true;
+            }
+        }
+        false
     }
 
     /// Decide `runsc` vs `runc`, provisioning gVisor when permitted.
@@ -1238,38 +1486,26 @@ async fn connect_uri(uri: &str) -> Result<Docker> {
     }
 }
 
-#[async_trait]
-impl Runtime for ContainerRuntime {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Container
-    }
-
-    /// Pull the image and tag it `cua-vmm/base:<base_name>`.
-    async fn ensure_base(&self, image: &ImageSource, base_name: &str) -> Result<CheckpointInfo> {
-        validate_name(base_name)?;
-        let ImageSource::Oci { reference } = image else {
-            return Err(VmmError::invalid("container bases must be OCI references"));
+impl ContainerRuntime {
+    /// Starts a Space from `spec` (the body of [`Runtime::start`]).
+    async fn start_placed(&self, spec: &StartSpec) -> Result<Instance> {
+        // "The machine's accelerators": the backend places them from what the
+        // machine has (crate::accel) and the caller names no runtime or card.
+        let placed;
+        let spec = if spec.gpu.as_deref() == Some(crate::accel::MACHINE) {
+            let plan = crate::accel::plan(&self.machine_facts().await);
+            write_class(&plan);
+            let mut s = spec.clone();
+            s.gpu = None;
+            if let Some(runtime) = plan.runtime.clone() {
+                s.container_runtime = Some(runtime);
+            }
+            s.accel = Some(plan);
+            placed = s;
+            &placed
+        } else {
+            spec
         };
-        let tagged = format!("{BASE_REPO}:{base_name}");
-        if self.docker.inspect_image(&tagged).await.is_err() {
-            self.ensure_image(reference, None).await?;
-            let opts = TagImageOptions {
-                repo: Some(BASE_REPO.into()),
-                tag: Some(base_name.into()),
-            };
-            self.docker
-                .tag_image(reference, Some(opts))
-                .await
-                .map_err(engine_err)?;
-        }
-        Ok(CheckpointInfo::now(
-            base_name,
-            BackendKind::Container,
-            Some(reference.clone()),
-        ))
-    }
-
-    async fn start(&self, spec: &StartSpec) -> Result<Instance> {
         validate_name(&spec.name)?;
         crate::types::reject_restricted_network(BackendKind::Container, spec)?;
         crate::egress::check(BackendKind::Container, &spec.egress)?;
@@ -1578,27 +1814,83 @@ impl Runtime for ContainerRuntime {
         }
         Ok(inst)
     }
+}
+
+impl ContainerRuntime {
+    /// With the VM service's CDI folder set, starts the card watcher (once per
+    /// process) and brings this Space's card nodes to the host's cards now.
+    async fn follow_cards(&self, name: &str) {
+        if crate::cdiclass::dir().is_none() {
+            return;
+        }
+        cardsync::start_watcher(self.docker.clone());
+        match cardsync::reconcile(&self.docker, name).await {
+            Ok(steps) if !steps.is_empty() => {
+                tracing::info!(name, ?steps, "the Space follows the host's cards")
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(name, error = %e, "the Space could not follow the host's cards")
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Runtime for ContainerRuntime {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Container
+    }
+
+    /// Pull the image and tag it `cua-vmm/base:<base_name>`.
+    async fn ensure_base(&self, image: &ImageSource, base_name: &str) -> Result<CheckpointInfo> {
+        validate_name(base_name)?;
+        let ImageSource::Oci { reference } = image else {
+            return Err(VmmError::invalid("container bases must be OCI references"));
+        };
+        let tagged = format!("{BASE_REPO}:{base_name}");
+        if self.docker.inspect_image(&tagged).await.is_err() {
+            self.ensure_image(reference, None).await?;
+            let opts = TagImageOptions {
+                repo: Some(BASE_REPO.into()),
+                tag: Some(base_name.into()),
+            };
+            self.docker
+                .tag_image(reference, Some(opts))
+                .await
+                .map_err(engine_err)?;
+        }
+        Ok(CheckpointInfo::now(
+            base_name,
+            BackendKind::Container,
+            Some(reference.clone()),
+        ))
+    }
+
+    async fn start(&self, spec: &StartSpec) -> Result<Instance> {
+        let inst = self.start_placed(spec).await?;
+        if spec.gpu.as_deref() == Some(crate::accel::MACHINE) {
+            self.follow_cards(&spec.name).await;
+        }
+        Ok(inst)
+    }
 
     async fn stop(&self, name: &str) -> Result<()> {
-        for sc in self.sidecar_names(name).await? {
-            let opts = StopContainerOptions {
-                t: Some(self.cfg.stop_timeout),
-                signal: None,
-            };
-            let _ = self.docker.stop_container(&sc, Some(opts)).await;
+        // A personal Space's orderly stop keeps its running programs: it is
+        // saved with its memory (and CUDA state) and resumes at its next start.
+        // Where that is not possible, the plain orderly stop runs.
+        if let Some(i) = self.inspect(name).await?
+            && keeps_programs(&i)
+            && self.support().await.ok()
+        {
+            match self.suspend_space(name, &i).await {
+                Ok(()) => return Ok(()),
+                Err(e) => {
+                    tracing::warn!(name, error = %e, "the Space could not be saved with its programs; stopping it in order");
+                }
+            }
         }
-        let opts = StopContainerOptions {
-            t: Some(self.cfg.stop_timeout),
-            signal: None,
-        };
-        match self.docker.stop_container(name, Some(opts)).await {
-            Ok(()) => Ok(()),
-            Err(e) if is_not_found(&e) => Err(VmmError::NotFound(name.into())),
-            Err(bollard::errors::Error::DockerResponseServerError {
-                status_code: 304, ..
-            }) => Ok(()),
-            Err(e) => Err(engine_err(e)),
-        }
+        self.stop_plain(name).await
     }
 
     async fn suspend(&self, name: &str) -> Result<()> {
@@ -1621,6 +1913,16 @@ impl Runtime for ContainerRuntime {
             .await?
             .ok_or_else(|| VmmError::NotFound(name.into()))?;
         if Self::status_from(&before) == Status::Stopped {
+            // A host that requires gVisor starts nothing made under runc.
+            if self.cfg.require_gvisor && matches!(Self::isolation_from(&before), Isolation::Runc) {
+                return Err(VmmError::invalid(format!(
+                    "{name} runs under runc, and this host runs Spaces only under gVisor"
+                )));
+            }
+            // A personal Space starts with the machine's cards of now.
+            if keeps_programs_when_running(&before) || is_space(&before) {
+                write_class(&crate::accel::plan(&self.machine_facts().await));
+            }
             if self.needs_recreate(name, &before) {
                 // Recreating it would drop its writable layer: never done for you.
                 return Err(VmmError::invalid(format!(
@@ -1631,9 +1933,29 @@ impl Runtime for ContainerRuntime {
                      (`cua sandbox cp`) and delete it"
                 )));
             }
-            self.start_policed(name).await?;
+            if let Err(e) = self.start_policed(name).await {
+                if !keeps_programs_when_running(&before) {
+                    return Err(e);
+                }
+                // A saved Space whose restore failed (another runsc build, a
+                // driver without cuda-checkpoint): it starts cold, programs lost.
+                tracing::warn!(name, error = %e, "the Space did not resume with its programs; starting it cold");
+                self.start_policed(name).await?;
+                note_fresh_start(name, "restore_failed".into());
+            }
             for sc in self.sidecar_names(name).await? {
                 let _ = self.docker.start_container(&sc, None).await;
+            }
+            if keeps_programs_when_running(&before)
+                && let Some(id) = before.id.as_deref()
+                && let Ok(Some(reason)) = self.helper().cold(id).await
+            {
+                // The disk changed after the save: the programs it held are gone.
+                tracing::warn!(name, %reason, "the Space started fresh; its programs were not kept");
+                note_fresh_start(name, reason);
+            }
+            if is_space(&before) {
+                self.follow_cards(name).await;
             }
         } else {
             self.docker
@@ -1658,6 +1980,12 @@ impl Runtime for ContainerRuntime {
         if self.inspect(new_name).await?.is_some() {
             return Err(VmmError::AlreadyExists(new_name.into()));
         }
+        let src_labels = self
+            .inspect(source)
+            .await?
+            .and_then(|i| i.config.and_then(|c| c.labels))
+            .unwrap_or_default();
+        refuse_personal_fork(source, &src_labels)?;
         let mut labels = HashMap::new();
         labels.insert("cua.vmm.source".to_string(), source.to_string());
         // A fork inherits its source's egress policy and network settings
@@ -1670,6 +1998,7 @@ impl Runtime for ContainerRuntime {
             && Self::under_wrapper(i)
             && Self::status_from(i) == Status::Running
             && self.support().await.ok()
+            && !self.root_writes_on_disk().await
         {
             let rec = self
                 .mem_checkpoint(source, i, &format!("fork-{new_name}"))
@@ -1743,6 +2072,7 @@ impl Runtime for ContainerRuntime {
         if Self::under_wrapper(&i)
             && Self::status_from(&i) == Status::Running
             && self.support().await.ok()
+            && !self.root_writes_on_disk().await
         {
             // Memory and the root overlay, in well under a second.
             let mut rec = self
@@ -2008,15 +2338,30 @@ impl Runtime for ContainerRuntime {
         // A restored container: the engine forgets it, and a fork that never
         // started still owns its private checkpoint. Its resolv.conf is
         // removed only when it mounts one (when it can't be told, as before).
-        let (restored, image_id, resolv) = match self.inspect(name).await {
+        let (restored, image_id, resolv, status) = match self.inspect(name).await {
             Ok(Some(i)) => (
                 restore_dir(&i).map(|d| (i.id.clone().unwrap_or_default(), d)),
                 i.image.clone(),
                 egress::has_resolv_bind(i.host_config.as_ref().and_then(|h| h.binds.as_ref())),
+                Some(Self::status_from(&i)),
             ),
-            Ok(None) => (None, None, false),
-            Err(_) => (None, None, true),
+            Ok(None) => (None, None, false, None),
+            Err(_) => (None, None, true, None),
         };
+        // A running sandbox is stopped in order before it is removed: its
+        // programs get SIGTERM and `stop_timeout` seconds to close their
+        // devices (a GPU process killed outright can leave the card's
+        // driver in a bad state). A forced remove alone sends SIGKILL.
+        if orderly_stop_first(&status) {
+            if matches!(status, Some(Status::Paused)) {
+                let _ = self.docker.unpause_container(name).await;
+                for sc in self.sidecar_names(name).await.unwrap_or_default() {
+                    let _ = self.docker.unpause_container(&sc).await;
+                }
+            }
+            // A delete never saves the Space: the plain orderly stop.
+            let _ = self.stop_plain(name).await;
+        }
         // Sidecars first: they hold the sandbox's network namespace.
         for sc in self.sidecar_names(name).await.unwrap_or_default() {
             let _ = self.docker.remove_container(&sc, Some(opts.clone())).await;
@@ -2413,6 +2758,7 @@ impl ContainerRuntime {
     /// [`choose_group_runtime`]); nothing silently falls back to runc.
     async fn group_runtime(&self, spec: &StartSpec) -> Result<String> {
         let explicit = spec.container_runtime.as_deref();
+        refuse_runc_when_required(self.cfg.require_gvisor, explicit)?;
         let resolved = if explicit == Some("runc") {
             "runc".to_string()
         } else {
@@ -3012,6 +3358,26 @@ fn create_body(
     // The caller's labels win (a build container sets `ai.cua.kind=build`,
     // an ephemeral sandbox `ai.cua.ephemeral=true`).
     labels.extend(spec.labels.iter().map(|(k, v)| (k.clone(), v.clone())));
+    // The plan the container was made with: a later start compares it with
+    // the machine's plan then, and the VM's status reads it.
+    if let Some(plan) = &spec.accel {
+        labels.insert(
+            crate::accel::LABEL_SPACE.into(),
+            crate::accel::PERSONAL.into(),
+        );
+        labels.insert(
+            LABEL_ACCEL.into(),
+            serde_json::to_string(&plan.cards).unwrap_or_default(),
+        );
+    }
+    let mut env: Vec<String> = spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect();
+    if let Some(caps) = spec
+        .accel
+        .as_ref()
+        .and_then(|p| p.nvidia_capabilities.as_ref())
+    {
+        env.push(format!("NVIDIA_DRIVER_CAPABILITIES={caps}"));
+    }
     let mut bindings = HashMap::new();
     let mut exposed = Vec::new();
     // Sidecars share this container's network namespace, so their ports are
@@ -3035,8 +3401,7 @@ fn create_body(
     }
     ContainerCreateBody {
         image: Some(image.to_string()),
-        env: (!spec.env.is_empty())
-            .then(|| spec.env.iter().map(|(k, v)| format!("{k}={v}")).collect()),
+        env: (!env.is_empty()).then_some(env),
         // `command` replaces the image's ENTRYPOINT and CMD, like a
         // Kubernetes `command`.
         entrypoint: spec.command.clone().filter(|c| !c.is_empty()),
@@ -3149,9 +3514,120 @@ fn apply_wsl_gpu(body: &mut ContainerCreateBody) {
     }
 }
 
+/// How long a runtime's own report may take (`runsc nvproxy list-supported-drivers`
+/// reads a table compiled into the binary). A report that does not come back in
+/// that time counts as no report: the plan then gives the sandbox no card.
+const RUNTIME_REPORT_SECONDS: u64 = 30;
+
+/// One read-only report of the gVisor binary the engine runs, or "" when it fails.
+async fn runsc_output(path: &str, args: &[&str]) -> String {
+    let run = tokio::process::Command::new(path)
+        .args(args)
+        .stdin(std::process::Stdio::null())
+        .kill_on_drop(true)
+        .output();
+    match tokio::time::timeout(std::time::Duration::from_secs(RUNTIME_REPORT_SECONDS), run).await {
+        Ok(Ok(out)) if out.status.success() => String::from_utf8_lossy(&out.stdout).into_owned(),
+        _ => String::new(),
+    }
+}
+
+/// Whether [`ContainerBackend::delete`] stops the sandbox in order before it
+/// removes it: when it runs or is paused (a stopped one has no programs left).
+fn orderly_stop_first(status: &Option<Status>) -> bool {
+    matches!(status, Some(Status::Running | Status::Paused))
+}
+
+/// A personal Space is one machine: it is never forked into a second one.
+/// Its checkpoints restore the same Space (#3282).
+fn refuse_personal_fork(source: &str, labels: &HashMap<String, String>) -> Result<()> {
+    if crate::accel::is_personal(labels.iter()) {
+        return Err(VmmError::invalid(format!(
+            "{source} is a personal Space; it is not forked. Its checkpoints restore the same Space."
+        )));
+    }
+    Ok(())
+}
+
+/// Exits 0 when a process in the Space has a GPU card file open.
+const HOLDS_A_CARD: &str = "for fd in /proc/[0-9]*/fd/*; do case \"$(readlink \"$fd\" 2>/dev/null)\" in /dev/nvidia[0-9]*) exit 0 ;; esac; done; exit 1";
+
+/// A string as one single-quoted shell word.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Where cuda-checkpoint is inside a Space unless `CUA_CUDA_CHECKPOINT` says.
+const CUDA_CHECKPOINT_PATH: &str = "/usr/local/bin/cuda-checkpoint";
+/// Names cuda-checkpoint's path inside a Space.
+const CUDA_CHECKPOINT_ENV: &str = "CUA_CUDA_CHECKPOINT";
+/// Names the host file of NVIDIA's cuda-checkpoint that the VM service installs
+/// after the owner accepts NVIDIA's licence; without that acceptance it is unset
+/// or names no file.
+const CUDA_CHECKPOINT_HOST_ENV: &str = "CUA_CUDA_CHECKPOINT_HOST";
+
+/// Rewrites the Space's CDI class from a plan's served cards, when the VM
+/// service keeps one. A failure is logged: the engine then reads the class as
+/// it was, and the Space starts with the cards of the last write.
+fn write_class(plan: &crate::accel::AccelPlan) {
+    if let Some(dir) = crate::cdiclass::dir() {
+        let served = plan.served().filter_map(|c| c.minor).collect();
+        if let Err(e) = crate::cdiclass::write(&dir, &served) {
+            tracing::warn!(error = %e, dir = %dir.display(), "could not write the Space's accelerator class");
+        }
+    }
+}
+
+/// Whether a container is a personal Space.
+fn is_space(i: &bollard::models::ContainerInspectResponse) -> bool {
+    i.config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref())
+        .is_some_and(|l| crate::accel::is_personal(l.iter()))
+}
+
+/// Whether runsc arguments turn the root overlay off (`--overlay2=none`,
+/// also as two words).
+fn overlay_off(args: &[String]) -> bool {
+    args.iter().any(|a| a == "--overlay2=none")
+        || args
+            .windows(2)
+            .any(|w| w[0] == "--overlay2" && w[1] == "none")
+}
+
+/// Whether a stopped container is a personal Space under the wrapper (one
+/// whose start may resume its saved programs).
+fn keeps_programs_when_running(i: &bollard::models::ContainerInspectResponse) -> bool {
+    i.config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref())
+        .is_some_and(|l| crate::accel::is_personal(l.iter()))
+        && ContainerRuntime::under_wrapper(i)
+}
+
+/// Whether a stop keeps the container's running programs: a personal Space,
+/// running under the checkpointing wrapper runtime.
+fn keeps_programs(i: &bollard::models::ContainerInspectResponse) -> bool {
+    let personal = i
+        .config
+        .as_ref()
+        .and_then(|c| c.labels.as_ref())
+        .is_some_and(|l| crate::accel::is_personal(l.iter()));
+    personal
+        && ContainerRuntime::under_wrapper(i)
+        && ContainerRuntime::status_from(i) == Status::Running
+}
+
+/// The label that records the accelerator plan a container was created with.
+pub const LABEL_ACCEL: &str = "ai.cua.accel";
+
 /// The engine's device requests for [`StartSpec::gpu`]: every NVIDIA GPU
-/// (`--gpus all`) for [`crate::gpu::NVIDIA`].
+/// (`--gpus all`) for [`crate::gpu::NVIDIA`]; the planned cards, by the
+/// driver's ids, for "the machine's accelerators" ([`StartSpec::accel`]).
 fn gpu_requests(spec: &StartSpec) -> Option<Vec<bollard::models::DeviceRequest>> {
+    if let Some(plan) = &spec.accel {
+        return plan_requests(plan);
+    }
     (spec.gpu.as_deref() == Some(crate::gpu::NVIDIA)).then(|| {
         vec![bollard::models::DeviceRequest {
             driver: Some("nvidia".into()),
@@ -3160,6 +3636,26 @@ fn gpu_requests(spec: &StartSpec) -> Option<Vec<bollard::models::DeviceRequest>>
             ..Default::default()
         }]
     })
+}
+
+/// The engine's device request for an accelerator plan: its one standing
+/// request (every card of the class, resolved at each start), or none.
+fn plan_requests(plan: &crate::accel::AccelPlan) -> Option<Vec<bollard::models::DeviceRequest>> {
+    use crate::accel::StandingRequest;
+    let request = match plan.request.as_ref()? {
+        StandingRequest::Cdi(name) => bollard::models::DeviceRequest {
+            driver: Some("cdi".into()),
+            device_ids: Some(vec![name.clone()]),
+            ..Default::default()
+        },
+        StandingRequest::NvidiaAll => bollard::models::DeviceRequest {
+            driver: Some("nvidia".into()),
+            count: Some(-1),
+            capabilities: Some(vec![vec!["gpu".into()]]),
+            ..Default::default()
+        },
+    };
+    Some(vec![request])
 }
 
 /// `/dev/shm` of a sandbox container: half its memory limit, at most
@@ -3225,6 +3721,17 @@ pub fn normalize_container_runtime(name: &str) -> Option<&'static str> {
         "runsc" | "gvisor" => Some("runsc"),
         _ => None,
     }
+}
+
+/// Refuses an explicit `runc` on a host that requires gVisor
+/// ([`REQUIRE_GVISOR_ENV`]): there every Space runs under gVisor.
+fn refuse_runc_when_required(require_gvisor: bool, explicit: Option<&str>) -> Result<()> {
+    if require_gvisor && explicit.and_then(normalize_container_runtime) == Some("runc") {
+        return Err(VmmError::invalid(
+            "this host runs Spaces only under gVisor; runtime runc is refused",
+        ));
+    }
+    Ok(())
 }
 
 /// The group's OCI runtime. `explicit` is the user's choice (`runc` /
@@ -3374,6 +3881,15 @@ fn pull_fraction(download: Option<f64>, extract: Option<f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_that_requires_gvisor_refuses_an_explicit_runc() {
+        assert!(refuse_runc_when_required(true, Some("runc")).is_err());
+        assert!(refuse_runc_when_required(true, Some(" RUNC ")).is_err());
+        assert!(refuse_runc_when_required(true, Some("gvisor")).is_ok());
+        assert!(refuse_runc_when_required(true, None).is_ok());
+        assert!(refuse_runc_when_required(false, Some("runc")).is_ok());
+    }
 
     #[test]
     fn pool_hosts_can_require_gvisor_by_environment() {
@@ -3762,6 +4278,287 @@ mod tests {
         assert_eq!(req[0].driver.as_deref(), Some("nvidia"));
         assert_eq!(req[0].count, Some(-1), "all of them");
         assert_eq!(req[0].capabilities, Some(vec![vec!["gpu".to_string()]]));
+    }
+
+    #[test]
+    fn a_container_with_the_machines_accelerators_asks_once_for_every_card() {
+        let mut spec = StartSpec::new("sb", ImageSource::Existing);
+        spec.accel = Some(crate::accel::AccelPlan {
+            runtime: Some("runsc".into()),
+            nvidia_devices: vec!["GPU-a".into(), "GPU-b".into()],
+            nvidia_capabilities: Some("compute,utility".into()),
+            request: Some(crate::accel::StandingRequest::NvidiaAll),
+            cards: vec![crate::accel::CardPlan {
+                pci: "0000:01:00.0".into(),
+                vendor: crate::accel::PCI_NVIDIA.into(),
+                served: true,
+                reason: String::new(),
+                minor: Some(0),
+            }],
+        });
+        let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
+        let hc = body.host_config.unwrap();
+        let req = hc.device_requests.unwrap();
+        // Every card, resolved at each start: no card ids fixed at create.
+        assert_eq!(
+            (req[0].driver.as_deref(), req[0].count),
+            (Some("nvidia"), Some(-1))
+        );
+        assert_eq!(req[0].device_ids, None);
+        assert_eq!(hc.runtime.as_deref(), Some("runsc"));
+        assert!(
+            body.env
+                .unwrap()
+                .contains(&"NVIDIA_DRIVER_CAPABILITIES=compute,utility".to_string())
+        );
+        assert!(body.labels.unwrap()[LABEL_ACCEL].contains("0000:01:00.0"));
+        // With a CDI spec the request names the class through CDI.
+        spec.accel.as_mut().unwrap().request = Some(crate::accel::StandingRequest::Cdi(
+            crate::accel::NVIDIA_CDI_ALL.into(),
+        ));
+        let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
+        let req = body.host_config.unwrap().device_requests.unwrap();
+        assert_eq!(req[0].driver.as_deref(), Some("cdi"));
+        assert_eq!(
+            req[0].device_ids,
+            Some(vec!["nvidia.com/gpu=all".to_string()])
+        );
+        // A plan without a request asks for no device and sets no capability.
+        spec.accel.as_mut().unwrap().request = None;
+        spec.accel.as_mut().unwrap().nvidia_capabilities = None;
+        let body = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into());
+        assert_eq!(body.host_config.unwrap().device_requests, None);
+        assert_eq!(body.env, None);
+    }
+
+    /// Proof that a standing device request is resolved at each start of the
+    /// same container, not when it is created (#3282). It needs a container
+    /// engine with CDI turned on, so it is ignored by default; run it with
+    /// `--ignored` on a machine where you may start containers:
+    ///
+    /// - `CUA_TEST_CDI_DIR`: a CDI spec directory the engine reads (`/etc/cdi`
+    ///   or one named in the engine's `cdi-spec-dirs`), writable by the test.
+    /// - `CUA_TEST_IMAGE`: a small image with `sh` and `ls` (default `busybox:1.36`).
+    ///
+    /// The spec's devices are the host's `/dev/null` and `/dev/zero` under new
+    /// names, so no GPU is needed. The container starts with one device, stops,
+    /// the spec grows to two, and the same container (same id) starts with two.
+    #[tokio::test]
+    #[ignore = "starts a container; needs an engine with CDI (see the doc comment)"]
+    async fn the_same_container_sees_the_devices_of_each_start() {
+        let dir = std::path::PathBuf::from(
+            std::env::var("CUA_TEST_CDI_DIR")
+                .expect("CUA_TEST_CDI_DIR names a CDI directory the engine reads"),
+        );
+        let image = std::env::var("CUA_TEST_IMAGE").unwrap_or_else(|_| "busybox:1.36".into());
+        let spec_file = dir.join("flip-test-dev.yaml");
+        let write_spec = |nodes: &[(&str, &str)]| {
+            let edits: String = nodes
+                .iter()
+                .map(|(host, guest)| format!("      - path: {guest}\n        hostPath: {host}\n"))
+                .collect();
+            std::fs::write(
+                &spec_file,
+                format!(
+                    "cdiVersion: 0.6.0\nkind: test.flip/dev\ndevices:\n  - name: all\n    containerEdits:\n      deviceNodes:\n{edits}"
+                ),
+            )
+            .unwrap();
+        };
+        let docker = Docker::connect_with_local_defaults().unwrap();
+        let name = format!("flip-cdi-proof-{}", std::process::id());
+        let devices = |docker: Docker, name: String| async move {
+            let exec = docker
+                .create_exec(
+                    &name,
+                    CreateExecOptions {
+                        cmd: Some(vec!["sh", "-c", "ls /dev | grep '^flip-' || true"]),
+                        attach_stdout: Some(true),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .unwrap();
+            let mut seen = String::new();
+            if let StartExecResults::Attached { mut output, .. } = docker
+                .start_exec(&exec.id, None::<StartExecOptions>)
+                .await
+                .unwrap()
+            {
+                while let Some(Ok(chunk)) = output.next().await {
+                    seen.push_str(&chunk.to_string());
+                }
+            }
+            let mut lines: Vec<String> = seen.lines().map(str::to_string).collect();
+            lines.sort();
+            lines
+        };
+        write_spec(&[("/dev/null", "/dev/flip-0")]);
+        let created = docker
+            .create_container(
+                Some(CreateContainerOptions {
+                    name: Some(name.clone()),
+                    platform: String::new(),
+                }),
+                ContainerCreateBody {
+                    image: Some(image),
+                    cmd: Some(vec!["sleep".into(), "600".into()]),
+                    host_config: Some(HostConfig {
+                        device_requests: Some(vec![bollard::models::DeviceRequest {
+                            driver: Some("cdi".into()),
+                            device_ids: Some(vec!["test.flip/dev=all".into()]),
+                            ..Default::default()
+                        }]),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        docker.start_container(&name, None).await.unwrap();
+        let first = devices(docker.clone(), name.clone()).await;
+        docker
+            .stop_container(
+                &name,
+                Some(StopContainerOptions {
+                    t: Some(10),
+                    signal: None,
+                }),
+            )
+            .await
+            .unwrap();
+        write_spec(&[("/dev/null", "/dev/flip-0"), ("/dev/zero", "/dev/flip-1")]);
+        docker.start_container(&name, None).await.unwrap();
+        let second = devices(docker.clone(), name.clone()).await;
+        let id = docker.inspect_container(&name, None).await.unwrap().id;
+        // Clean up before asserting, so a failed run leaves nothing behind.
+        let _ = docker
+            .stop_container(
+                &name,
+                Some(StopContainerOptions {
+                    t: Some(10),
+                    signal: None,
+                }),
+            )
+            .await;
+        let _ = docker.remove_container(&name, None).await;
+        let _ = std::fs::remove_file(&spec_file);
+        assert_eq!(first, vec!["flip-0"]);
+        assert_eq!(second, vec!["flip-0", "flip-1"]);
+        assert_eq!(id.as_deref(), Some(created.id.as_str()));
+    }
+
+    #[test]
+    fn a_personal_space_carries_its_label_and_is_never_forked() {
+        let mut spec = StartSpec::new("sb", ImageSource::Existing);
+        spec.accel = Some(crate::accel::AccelPlan {
+            runtime: Some("runsc".into()),
+            nvidia_devices: vec![],
+            nvidia_capabilities: None,
+            request: None,
+            cards: vec![],
+        });
+        let labels = create_body("sb", "img:1", &spec, HashMap::new(), "runsc".into())
+            .labels
+            .unwrap();
+        assert_eq!(labels[crate::accel::LABEL_SPACE], crate::accel::PERSONAL);
+        assert!(refuse_personal_fork("sb", &labels).is_err());
+        assert!(refuse_personal_fork("other", &HashMap::new()).is_ok());
+        // A plain container is no Space.
+        let plain = create_body(
+            "sb",
+            "img:1",
+            &StartSpec::new("sb", ImageSource::Existing),
+            HashMap::new(),
+            "runc".into(),
+        );
+        assert!(
+            !plain
+                .labels
+                .unwrap_or_default()
+                .contains_key(crate::accel::LABEL_SPACE)
+        );
+    }
+
+    #[test]
+    fn only_a_running_personal_space_under_the_wrapper_keeps_its_programs() {
+        let make = |personal: bool, runtime: &str, running: bool| {
+            let mut labels = HashMap::new();
+            if personal {
+                labels.insert(
+                    crate::accel::LABEL_SPACE.to_string(),
+                    crate::accel::PERSONAL.to_string(),
+                );
+            }
+            bollard::models::ContainerInspectResponse {
+                config: Some(bollard::models::ContainerConfig {
+                    labels: Some(labels),
+                    ..Default::default()
+                }),
+                host_config: Some(HostConfig {
+                    runtime: Some(runtime.into()),
+                    ..Default::default()
+                }),
+                state: Some(bollard::models::ContainerState {
+                    running: Some(running),
+                    status: Some(if running {
+                        bollard::models::ContainerStateStatusEnum::RUNNING
+                    } else {
+                        bollard::models::ContainerStateStatusEnum::EXITED
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }
+        };
+        assert!(keeps_programs(&make(true, snapshot::WRAPPER_RUNTIME, true)));
+        assert!(!keeps_programs(&make(
+            false,
+            snapshot::WRAPPER_RUNTIME,
+            true
+        )));
+        assert!(!keeps_programs(&make(true, "runsc", true)));
+        assert!(!keeps_programs(&make(
+            true,
+            snapshot::WRAPPER_RUNTIME,
+            false
+        )));
+    }
+
+    #[test]
+    fn the_overlay_is_off_only_with_overlay2_none() {
+        let args = |a: &[&str]| a.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(overlay_off(&args(&["--nvproxy", "--overlay2=none"])));
+        assert!(overlay_off(&args(&["--overlay2", "none"])));
+        assert!(!overlay_off(&args(&["--overlay2=root:self"])));
+        assert!(!overlay_off(&args(&[])));
+    }
+
+    #[test]
+    fn shell_quoting_keeps_a_path_one_word() {
+        assert_eq!(
+            sh_quote("/usr/local/bin/cuda-checkpoint"),
+            "'/usr/local/bin/cuda-checkpoint'"
+        );
+        assert_eq!(sh_quote("it's"), "'it'\\''s'");
+    }
+
+    #[test]
+    fn delete_stops_a_running_or_paused_sandbox_in_order_first() {
+        assert!(orderly_stop_first(&Some(Status::Running)));
+        assert!(orderly_stop_first(&Some(Status::Paused)));
+        assert!(!orderly_stop_first(&Some(Status::Stopped)));
+        assert!(!orderly_stop_first(&None));
+    }
+
+    #[test]
+    fn every_backend_accepts_the_machines_accelerators_as_a_need() {
+        let mut spec = StartSpec::new("sb", ImageSource::Existing);
+        spec.gpu = Some(crate::accel::MACHINE.into());
+        for backend in [BackendKind::Container, BackendKind::Qemu, BackendKind::Lume] {
+            assert!(crate::types::reject_gpu(backend, &spec, &[]).is_ok());
+        }
     }
 
     #[tokio::test]

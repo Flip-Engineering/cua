@@ -2299,7 +2299,17 @@ impl HostSpacesServer {
             &subject,
             &record.local_space,
         );
+        // A Space saved with its programs that started fresh says so, once.
+        let fresh_start = if on {
+            cua_vmm::container::take_start_note(name).map(|f| pb::FreshStart {
+                reason: f.reason,
+                at_unix: f.at_unix,
+            })
+        } else {
+            None
+        };
         Ok(pb::SetHostSpacePowerResponse {
+            fresh_start,
             state: report.state,
             power: report.power,
             message: format!(
