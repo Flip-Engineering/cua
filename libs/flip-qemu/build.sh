@@ -76,7 +76,7 @@ ninja -C "$work/virgl-build" install
 rm -rf "$work/qemu-build"
 mkdir -p "$work/qemu-build"
 (cd "$work/qemu-build" && "$src/qemu-$QEMU_VERSION/configure" --prefix="$prefix" \
-  --target-list="$target" --enable-kvm --enable-virglrenderer --enable-opengl --enable-gbm \
+  --target-list="$target" --enable-kvm --enable-virglrenderer --enable-opengl \
   --enable-slirp --enable-seccomp --enable-cap-ng --enable-vnc --enable-tools \
   --disable-docs --disable-gtk --disable-sdl --disable-spice --disable-xen \
   --disable-werror)

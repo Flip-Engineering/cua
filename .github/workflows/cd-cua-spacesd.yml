@@ -459,9 +459,17 @@ jobs:
         run: |
           echo "::error::refusing to publish an unsigned cua-spacesd.exe: the Azure Artifact Signing vars are not set in the cua-driver-release-signing environment"
           exit 1
+      # The C dependencies' CMake trees under target\ pass Windows' 260-character path limit
+      # (MSBuild's file tracker needs it even with long paths on), so the build runs in a
+      # short folder and the binary comes back to target/ where the next steps read it.
       - name: Build
         working-directory: libs/cua-spacesd
-        run: cargo build --locked --release --target "$TARGET" -p cua-spacesd --bin cua-spacesd
+        env:
+          CARGO_TARGET_DIR: 'C:\fb\spacesd'
+        run: |
+          cargo build --locked --release --target "$TARGET" -p cua-spacesd --bin cua-spacesd
+          mkdir -p "target/$TARGET/release"
+          cp "$CARGO_TARGET_DIR/$TARGET/release/cua-spacesd.exe" "target/$TARGET/release/"
       # Authenticode via Azure Artifact Signing (same account as Cua Driver),
       # only when the repository variables are configured.
       - name: Azure login for Artifact Signing
@@ -646,9 +654,15 @@ jobs:
         with:
           go-version-file: libs/cua/netgw/go.mod
           cache-dependency-path: libs/cua/netgw/go.sum
+      # A short build folder, as in the spacesd Windows job (Windows' path limit).
       - name: Build
         working-directory: libs/cua
-        run: cargo build --locked --release --target "$TARGET" -p cua-spaces-cli --bin cua-spaces-cli
+        env:
+          CARGO_TARGET_DIR: 'C:\fb\cli'
+        run: |
+          cargo build --locked --release --target "$TARGET" -p cua-spaces-cli --bin cua-spaces-cli
+          mkdir -p "target/$TARGET/release"
+          cp "$CARGO_TARGET_DIR/$TARGET/release/cua-spaces-cli.exe" "target/$TARGET/release/"
       - name: Build the Windows VM gateway
         working-directory: libs/cua
         env:

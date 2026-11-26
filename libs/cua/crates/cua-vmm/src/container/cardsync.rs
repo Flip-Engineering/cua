@@ -2,6 +2,10 @@
 //! (#3282, design section 3): one kernel-event watcher per process, and a
 //! reconcile at each Space start. It never runs nvidia-smi and never opens a
 //! card; it reads `/dev`, `/proc` and runsc's state files.
+//!
+//! runsc and its device gofer exist only on Linux. Elsewhere a Space has no
+//! card nodes to follow: [`reconcile`] finds nothing and no watcher starts.
+#![cfg_attr(not(target_os = "linux"), allow(dead_code, unused_imports))]
 
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -25,6 +29,7 @@ pub(crate) fn kernel_has_mount_api(release: &str) -> bool {
     (major, minor) >= KERNEL_FLOOR
 }
 
+#[cfg(target_os = "linux")]
 fn kernel_release() -> String {
     std::fs::read_to_string("/proc/sys/kernel/osrelease").unwrap_or_default()
 }
@@ -42,11 +47,13 @@ fn dev_cards(dev: &Path) -> BTreeSet<u32> {
 }
 
 /// The three card sets of one running Space.
+#[cfg(target_os = "linux")]
 struct Live {
     gofer_pid: i32,
     space: BTreeSet<u32>,
 }
 
+#[cfg(target_os = "linux")]
 impl DeviceSource for Live {
     fn host(&self) -> BTreeSet<u32> {
         dev_cards(Path::new("/dev"))
@@ -77,6 +84,7 @@ pub(crate) fn runsc_boot_root(args: &[String], id: &str) -> Option<PathBuf> {
 
 /// The sandbox process of container `id` and its runsc root as that process
 /// sees it.
+#[cfg(target_os = "linux")]
 fn find_sandbox(id: &str) -> Option<(i32, PathBuf)> {
     std::fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
         let pid: i32 = e.file_name().to_str()?.parse().ok()?;
@@ -93,6 +101,7 @@ fn find_sandbox(id: &str) -> Option<(i32, PathBuf)> {
 /// Brings one running personal Space's card nodes to the host's cards and
 /// returns the steps it carried out (none when the Space is not under runsc,
 /// not running, or already equal).
+#[cfg(target_os = "linux")]
 pub async fn reconcile(docker: &Docker, name: &str) -> std::result::Result<Vec<NodeStep>, String> {
     let info = match docker.inspect_container(name, None).await {
         Ok(i) => i,
@@ -164,6 +173,15 @@ pub async fn reconcile(docker: &Docker, name: &str) -> std::result::Result<Vec<N
     Ok(done)
 }
 
+/// Without runsc no Space has card nodes to follow.
+#[cfg(not(target_os = "linux"))]
+pub async fn reconcile(
+    _docker: &Docker,
+    _name: &str,
+) -> std::result::Result<Vec<NodeStep>, String> {
+    Ok(vec![])
+}
+
 /// What a card event changes: NVIDIA's CDI spec and our class in the VM
 /// service's CDI folder, then the nodes of every running personal Space.
 pub async fn on_cards_changed(docker: &Docker) {
@@ -221,6 +239,7 @@ pub async fn on_cards_changed(docker: &Docker) {
 /// Starts the kernel-event watcher once per process. Events come in bursts
 /// (bind, then the driver's own events), so one reconcile runs after the
 /// burst is over.
+#[cfg(target_os = "linux")]
 pub fn start_watcher(docker: Docker) {
     static STARTED: std::sync::Once = std::sync::Once::new();
     STARTED.call_once(|| {
@@ -247,6 +266,10 @@ pub fn start_watcher(docker: Docker) {
         });
     });
 }
+
+/// The kernel's device events are a Linux socket; elsewhere there is nothing to watch.
+#[cfg(not(target_os = "linux"))]
+pub fn start_watcher(_docker: Docker) {}
 
 #[cfg(test)]
 mod tests {

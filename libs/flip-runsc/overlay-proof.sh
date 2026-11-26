@@ -37,8 +37,20 @@ JSON
 # container (its own cgroup namespace): on a host this would move the host's processes.
 if [ -f /.dockerenv ] && [ -f /sys/fs/cgroup/cgroup.controllers ] && [ -w /sys/fs/cgroup/cgroup.subtree_control ]; then
   mkdir -p /sys/fs/cgroup/init
-  while read -r pid; do echo "$pid" >/sys/fs/cgroup/init/cgroup.procs 2>/dev/null || true; done </sys/fs/cgroup/cgroup.procs
-  sed -e "s/ / +/g" -e "s/^/+/" </sys/fs/cgroup/cgroup.controllers >/sys/fs/cgroup/cgroup.subtree_control
+  # A process the runner starts in the container meanwhile lands in the root again and
+  # makes the write fail, so move what is there and write until the root is empty. A root
+  # whose processes cannot move stops the proof with that reason.
+  until sed -e "s/ / +/g" -e "s/^/+/" </sys/fs/cgroup/cgroup.controllers >/sys/fs/cgroup/cgroup.subtree_control 2>/dev/null; do
+    moved=0
+    while read -r pid; do
+      if echo "$pid" >/sys/fs/cgroup/init/cgroup.procs 2>/dev/null; then moved=1; fi
+    done </sys/fs/cgroup/cgroup.procs
+    if [ "$moved" = 0 ]; then
+      echo "overlay-proof: the container's root cgroup keeps processes that cannot move:" >&2
+      cat /sys/fs/cgroup/cgroup.procs >&2
+      exit 1
+    fi
+  done
 fi
 dockerd --config-file "$work/daemon.json" --data-root "$work/data" --exec-root "$work/exec" \
   --host "$sock" --pidfile "$work/dockerd.pid" >"$work/dockerd.log" 2>&1 &
