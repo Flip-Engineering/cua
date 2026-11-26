@@ -166,6 +166,10 @@ pub struct GoferNodes {
     pub runsc_root: std::path::PathBuf,
     /// The container's id.
     pub container_id: String,
+    /// A process whose user and mount namespaces runsc runs in (the Space's
+    /// sandbox), so `runsc` and `runsc_root` are paths as it sees them. A
+    /// rootless engine runs runsc inside its own namespaces.
+    pub enter_pid: Option<i32>,
 }
 
 #[cfg(target_os = "linux")]
@@ -185,12 +189,43 @@ impl GoferNodes {
     }
 
     fn refresh(&self) -> std::io::Result<String> {
-        let out = std::process::Command::new(&self.runsc)
-            .arg("--root")
+        use std::os::fd::AsRawFd;
+        use std::os::unix::process::CommandExt;
+        let mut cmd = std::process::Command::new(&self.runsc);
+        cmd.arg("--root")
             .arg(&self.runsc_root)
             .args(["nvproxy", "refresh", &self.container_id])
-            .stdin(std::process::Stdio::null())
-            .output()?;
+            .stdin(std::process::Stdio::null());
+        // The namespace files are opened here; the child only calls setns.
+        let mut enter = Vec::new();
+        if let Some(pid) = self.enter_pid {
+            let own_user = std::fs::read_link("/proc/self/ns/user").ok();
+            let their_user = std::fs::read_link(format!("/proc/{pid}/ns/user")).ok();
+            if own_user != their_user {
+                enter.push((
+                    std::fs::File::open(format!("/proc/{pid}/ns/user"))?,
+                    libc::CLONE_NEWUSER,
+                ));
+            }
+            enter.push((
+                std::fs::File::open(format!("/proc/{pid}/ns/mnt"))?,
+                libc::CLONE_NEWNS,
+            ));
+        }
+        let fds: Vec<(i32, i32)> = enter.iter().map(|(f, k)| (f.as_raw_fd(), *k)).collect();
+        // SAFETY: setns is async-signal-safe and uses fds opened before fork.
+        unsafe {
+            cmd.pre_exec(move || {
+                for (fd, kind) in &fds {
+                    if libc::setns(*fd, *kind) != 0 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                }
+                Ok(())
+            });
+        }
+        let out = cmd.output()?;
+        drop(enter);
         if !out.status.success() {
             return Err(std::io::Error::other(
                 String::from_utf8_lossy(&out.stderr).trim().to_string(),

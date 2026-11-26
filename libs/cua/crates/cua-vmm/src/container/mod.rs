@@ -11,6 +11,7 @@
 //!
 //! [`DockerExec`] is the agentless guest-exec path for containers.
 
+pub mod cardsync;
 pub mod egress;
 pub mod engine;
 pub mod gvisor;
@@ -511,7 +512,15 @@ impl ContainerRuntime {
     /// its PCI accelerators and drivers, and the engine's runtimes by their exact
     /// names. The gVisor runtime is asked which drivers its GPU proxy supports.
     pub async fn machine_facts(&self) -> crate::accel::MachineFacts {
-        let runtimes = match self.docker.info().await {
+        machine_facts_of(&self.docker).await
+    }
+}
+
+/// The machine's accelerator facts, read through engine `docker` and the host's
+/// /sys and /proc (never nvidia-smi).
+pub(crate) async fn machine_facts_of(docker: &Docker) -> crate::accel::MachineFacts {
+    {
+        let runtimes = match docker.info().await {
             Ok(info) => info.runtimes.unwrap_or_default(),
             Err(_) => Default::default(),
         };
@@ -549,7 +558,9 @@ impl ContainerRuntime {
             sandbox_runtime,
         }
     }
+}
 
+impl ContainerRuntime {
     /// The extra arguments the engine runs runtime `name` with (`None` when
     /// it is not registered).
     pub async fn runtime_args(&self, name: &str) -> Result<Option<Vec<String>>> {
@@ -1399,38 +1410,9 @@ async fn connect_uri(uri: &str) -> Result<Docker> {
     }
 }
 
-#[async_trait]
-impl Runtime for ContainerRuntime {
-    fn kind(&self) -> BackendKind {
-        BackendKind::Container
-    }
-
-    /// Pull the image and tag it `cua-vmm/base:<base_name>`.
-    async fn ensure_base(&self, image: &ImageSource, base_name: &str) -> Result<CheckpointInfo> {
-        validate_name(base_name)?;
-        let ImageSource::Oci { reference } = image else {
-            return Err(VmmError::invalid("container bases must be OCI references"));
-        };
-        let tagged = format!("{BASE_REPO}:{base_name}");
-        if self.docker.inspect_image(&tagged).await.is_err() {
-            self.ensure_image(reference, None).await?;
-            let opts = TagImageOptions {
-                repo: Some(BASE_REPO.into()),
-                tag: Some(base_name.into()),
-            };
-            self.docker
-                .tag_image(reference, Some(opts))
-                .await
-                .map_err(engine_err)?;
-        }
-        Ok(CheckpointInfo::now(
-            base_name,
-            BackendKind::Container,
-            Some(reference.clone()),
-        ))
-    }
-
-    async fn start(&self, spec: &StartSpec) -> Result<Instance> {
+impl ContainerRuntime {
+    /// Starts a Space from `spec` (the body of [`Runtime::start`]).
+    async fn start_placed(&self, spec: &StartSpec) -> Result<Instance> {
         // "The machine's accelerators": the backend places them from what the
         // machine has (crate::accel) and the caller names no runtime or card.
         let placed;
@@ -1756,6 +1738,66 @@ impl Runtime for ContainerRuntime {
         }
         Ok(inst)
     }
+}
+
+impl ContainerRuntime {
+    /// With the VM service's CDI folder set, starts the card watcher (once per
+    /// process) and brings this Space's card nodes to the host's cards now.
+    async fn follow_cards(&self, name: &str) {
+        if crate::cdiclass::dir().is_none() {
+            return;
+        }
+        cardsync::start_watcher(self.docker.clone());
+        match cardsync::reconcile(&self.docker, name).await {
+            Ok(steps) if !steps.is_empty() => {
+                tracing::info!(name, ?steps, "the Space follows the host's cards")
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(name, error = %e, "the Space could not follow the host's cards")
+            }
+        }
+    }
+}
+
+#[async_trait]
+impl Runtime for ContainerRuntime {
+    fn kind(&self) -> BackendKind {
+        BackendKind::Container
+    }
+
+    /// Pull the image and tag it `cua-vmm/base:<base_name>`.
+    async fn ensure_base(&self, image: &ImageSource, base_name: &str) -> Result<CheckpointInfo> {
+        validate_name(base_name)?;
+        let ImageSource::Oci { reference } = image else {
+            return Err(VmmError::invalid("container bases must be OCI references"));
+        };
+        let tagged = format!("{BASE_REPO}:{base_name}");
+        if self.docker.inspect_image(&tagged).await.is_err() {
+            self.ensure_image(reference, None).await?;
+            let opts = TagImageOptions {
+                repo: Some(BASE_REPO.into()),
+                tag: Some(base_name.into()),
+            };
+            self.docker
+                .tag_image(reference, Some(opts))
+                .await
+                .map_err(engine_err)?;
+        }
+        Ok(CheckpointInfo::now(
+            base_name,
+            BackendKind::Container,
+            Some(reference.clone()),
+        ))
+    }
+
+    async fn start(&self, spec: &StartSpec) -> Result<Instance> {
+        let inst = self.start_placed(spec).await?;
+        if spec.gpu.as_deref() == Some(crate::accel::MACHINE) {
+            self.follow_cards(&spec.name).await;
+        }
+        Ok(inst)
+    }
 
     async fn stop(&self, name: &str) -> Result<()> {
         // A personal Space's orderly stop keeps its running programs: it is
@@ -1820,6 +1862,9 @@ impl Runtime for ContainerRuntime {
             }
             for sc in self.sidecar_names(name).await? {
                 let _ = self.docker.start_container(&sc, None).await;
+            }
+            if is_space(&before) {
+                self.follow_cards(name).await;
             }
         } else {
             self.docker
