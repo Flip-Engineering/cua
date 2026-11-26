@@ -239,7 +239,7 @@ jobs:
       - &give_back_work_folder
         name: Give the work folder back to the runner's user
         if: always()
-        run: chown -R "$(stat -c %u:%g "$RUNNER_WORKSPACE")" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
+        run: chown -hR "$(stat -c %u:%g "$RUNNER_WORKSPACE")" "$GITHUB_WORKSPACE" "$RUNNER_TEMP"
 
   macos:
     needs: version
