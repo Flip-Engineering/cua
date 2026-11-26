@@ -347,7 +347,9 @@ message SetHostSpacePowerResponse {
 
 // A Space that started fresh, not with the programs it was saved with.
 message FreshStart {
-  // Why, in plain words ("the disk changed after the save").
+  // Why, as one code of a closed list: "disk_changed" (the disk changed after
+  // the save), "save_unverified" (the save has no disk generation to compare)
+  // or "restore_failed" (the restore of the saved programs failed).
   string reason = 1;
   // When it started, in seconds since the Unix epoch.
   int64 at_unix = 2;

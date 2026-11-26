@@ -22,7 +22,9 @@
 #   rm <dir>...               delete checkpoints
 #   forget <id>...            drop what is kept about deleted containers
 #   cold <id>                 print and clear why a suspended container last
-#                             started cold (its disk changed after the save)
+#                             started cold, as a code: disk_changed (its disk
+#                             changed after the save) or save_unverified (the
+#                             save has no disk generation to compare)
 set -u
 RUNSC=@RUNSC@
 [ -x "$RUNSC" ] || RUNSC=/usr/bin/runsc
@@ -200,7 +202,11 @@ create)
                 # the Space starts cold, and cua says its programs were not kept.
                 rm -f "$STATE/$id.restore"
                 mkdir -p "$STORE/.cold"
-                echo "the disk changed after the save" >"$STORE/.cold/$id"
+                if [ -n "$saved" ] && [ -n "$now" ]; then
+                    echo disk_changed >"$STORE/.cold/$id"
+                else
+                    echo save_unverified >"$STORE/.cold/$id"
+                fi
             fi
             rm -f "$STORE/.resume/$id" "$STORE/.resume/$id.gen"
         # Only the first start restores: a container stopped and started

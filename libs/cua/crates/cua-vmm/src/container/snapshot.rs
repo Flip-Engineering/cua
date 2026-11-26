@@ -64,7 +64,7 @@ pub const WRAPPER_RUNTIME: &str = "cua-runsc";
 pub const WRAPPER_PATH: &str = "/usr/local/lib/cua/cua-runsc";
 /// Bumped with every change to `cua-runsc.sh`: an engine with another
 /// version gets this one installed.
-pub const WRAPPER_VERSION: &str = "3";
+pub const WRAPPER_VERSION: &str = "4";
 /// The OCI annotation naming the checkpoint a container restores on start.
 pub const ANNOTATION_RESTORE: &str = "ai.cua.restore";
 /// The privileged helper container (one per engine).
@@ -1243,6 +1243,7 @@ mod tests {
         assert!(restores(), "the same disk resumes the programs");
 
         run(&["delete", "c1"]);
+        run(&["create", "--bundle", b, "c1"]);
         save();
         run(&["delete", "c1"]);
         std::fs::write(bundle.join("rootfs/etc/a"), "changed\n").unwrap();
@@ -1253,13 +1254,31 @@ mod tests {
             .args(["cua", "cold", "c1"])
             .output()
             .unwrap();
-        assert!(String::from_utf8_lossy(&out.stdout).contains("the disk changed after the save"));
+        assert_eq!(String::from_utf8_lossy(&out.stdout).trim(), "disk_changed");
         let again = Command::new("sh")
             .arg(&wrapper)
             .args(["cua", "cold", "c1"])
             .output()
             .unwrap();
         assert!(again.stdout.is_empty(), "the reason is read once");
+
+        // A save with no disk generation to compare starts cold too, and says so.
+        run(&["delete", "c1"]);
+        run(&["create", "--bundle", b, "c1"]);
+        save();
+        run(&["delete", "c1"]);
+        std::fs::remove_file(store.join(".resume/c1.gen")).unwrap();
+        run(&["create", "--bundle", b, "c1"]);
+        assert!(!restores(), "an unverified save starts cold");
+        let out = Command::new("sh")
+            .arg(&wrapper)
+            .args(["cua", "cold", "c1"])
+            .output()
+            .unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&out.stdout).trim(),
+            "save_unverified"
+        );
     }
     use super::*;
 

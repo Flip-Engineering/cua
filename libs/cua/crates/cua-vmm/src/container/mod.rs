@@ -179,7 +179,9 @@ pub struct ContainerRuntime {
 /// A Space saved with its programs that started fresh instead.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FreshStart {
-    /// Why, in plain words ("the disk changed after the save").
+    /// Why, as one code of a closed list: `disk_changed` (the disk changed after
+    /// the save), `save_unverified` (the save has no disk generation to compare)
+    /// or `restore_failed` (the restore of the saved programs failed).
     pub reason: String,
     /// When it started, in seconds since the Unix epoch.
     pub at_unix: i64,
@@ -188,6 +190,18 @@ pub struct FreshStart {
 /// Fresh starts not yet told, by Space name.
 static START_NOTES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, FreshStart>>> =
     std::sync::LazyLock::new(Default::default);
+
+/// Notes that Space `name` started fresh, for `reason` (a code, see [`FreshStart`]).
+fn note_fresh_start(name: &str, reason: String) {
+    let at_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or_default();
+    START_NOTES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(name.to_string(), FreshStart { reason, at_unix });
+}
 
 /// Takes Space `name`'s fresh start, once (`None` when it resumed or was not saved).
 pub fn take_start_note(name: &str) -> Option<FreshStart> {
@@ -1927,6 +1941,7 @@ impl Runtime for ContainerRuntime {
                 // driver without cuda-checkpoint): it starts cold, programs lost.
                 tracing::warn!(name, error = %e, "the Space did not resume with its programs; starting it cold");
                 self.start_policed(name).await?;
+                note_fresh_start(name, "restore_failed".into());
             }
             for sc in self.sidecar_names(name).await? {
                 let _ = self.docker.start_container(&sc, None).await;
@@ -1937,14 +1952,7 @@ impl Runtime for ContainerRuntime {
             {
                 // The disk changed after the save: the programs it held are gone.
                 tracing::warn!(name, %reason, "the Space started fresh; its programs were not kept");
-                let at_unix = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.as_secs() as i64)
-                    .unwrap_or_default();
-                START_NOTES
-                    .lock()
-                    .unwrap_or_else(|p| p.into_inner())
-                    .insert(name.to_string(), FreshStart { reason, at_unix });
+                note_fresh_start(name, reason);
             }
             if is_space(&before) {
                 self.follow_cards(name).await;
