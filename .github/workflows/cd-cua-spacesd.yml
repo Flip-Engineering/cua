@@ -75,7 +75,28 @@ env:
   CANONICAL: ${{ github.repository == 'trycua/cua' }}
 
 jobs:
+  # Fails when a workflow other than the ones in .github/flip-active-workflows.txt
+  # is active on the fork, or when this workflow names a GitHub-hosted machine.
+  guard:
+    runs-on: [self-hosted, Linux, X64, docker-linux]
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            .github
+          persist-credentials: false
+      - name: No job on GitHub's machines
+        run: python3 .github/scripts/check_flip_actions.py static .
+      - name: No other active workflow
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python3 .github/scripts/check_flip_actions.py live "$GITHUB_REPOSITORY"
+
   version:
+    needs: guard
     runs-on: [self-hosted, Linux, X64, docker-linux]
     outputs:
       version: ${{ steps.v.outputs.version }}

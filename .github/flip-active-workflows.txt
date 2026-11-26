@@ -1,0 +1,4 @@
+# Workflows that may be active on Flip-Engineering/cua. Every other one stays
+# switched off on GitHub (gh workflow disable). Checked by
+# .github/scripts/check_flip_actions.py in the release workflow's guard job.
+.github/workflows/cd-cua-spacesd.yml
