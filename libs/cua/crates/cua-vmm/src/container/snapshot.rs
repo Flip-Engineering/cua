@@ -64,7 +64,7 @@ pub const WRAPPER_RUNTIME: &str = "cua-runsc";
 pub const WRAPPER_PATH: &str = "/usr/local/lib/cua/cua-runsc";
 /// Bumped with every change to `cua-runsc.sh`: an engine with another
 /// version gets this one installed.
-pub const WRAPPER_VERSION: &str = "2";
+pub const WRAPPER_VERSION: &str = "3";
 /// The OCI annotation naming the checkpoint a container restores on start.
 pub const ANNOTATION_RESTORE: &str = "ai.cua.restore";
 /// The privileged helper container (one per engine).
@@ -609,6 +609,16 @@ impl Helper {
         let mut argv = vec![WRAPPER_PATH, "cua", "suspend", id, dir];
         argv.extend(cuda);
         self.run_ok(&argv, Duration::from_secs(600)).await.map(drop)
+    }
+
+    /// Why suspended container `id` last started cold, cleared once read
+    /// (`None` when it resumed with its programs or was not suspended).
+    pub async fn cold(&self, id: &str) -> Result<Option<String>> {
+        let out = self
+            .run_ok(&[WRAPPER_PATH, "cua", "cold", id], Duration::from_secs(30))
+            .await?;
+        let reason = out.trim();
+        Ok((!reason.is_empty()).then(|| reason.to_string()))
     }
 
     /// Forgets deleted containers (the record that they were restored).
@@ -1165,6 +1175,92 @@ impl GoldenJob {
 
 #[cfg(test)]
 mod tests {
+
+    /// A suspended Space resumes with its programs only on the disk it was saved
+    /// with: the wrapper records the disk's generation when the engine deletes the
+    /// saved container, and a changed (or unknown) generation starts it cold.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_suspended_space_resumes_only_on_the_disk_it_was_saved_with() {
+        use std::process::Command;
+        let dir = tempfile::tempdir().unwrap();
+        let base = dir.path();
+        let (state, store, bundle) = (base.join("state"), base.join("store"), base.join("bundle"));
+        std::fs::create_dir_all(store.join(".resume")).unwrap();
+        std::fs::create_dir_all(bundle.join("rootfs/etc")).unwrap();
+        std::fs::write(
+            bundle.join("config.json"),
+            r#"{"ociVersion":"1.0.2","root":{"path":"rootfs","readonly":false}}"#,
+        )
+        .unwrap();
+        std::fs::write(bundle.join("rootfs/etc/a"), "hello\n").unwrap();
+        let runsc = base.join("runsc");
+        std::fs::write(&runsc, "#!/bin/sh\nexit 0\n").unwrap();
+        std::os::unix::fs::PermissionsExt::set_mode(
+            &mut std::fs::metadata(&runsc).unwrap().permissions(),
+            0o755,
+        );
+        Command::new("chmod")
+            .arg("755")
+            .arg(&runsc)
+            .status()
+            .unwrap();
+        let wrapper = base.join("w");
+        std::fs::write(
+            &wrapper,
+            render_wrapper(
+                runsc.to_str().unwrap(),
+                state.to_str().unwrap(),
+                store.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+        let run = |args: &[&str]| {
+            assert!(
+                Command::new("sh")
+                    .arg(&wrapper)
+                    .args(args)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        };
+        let b = bundle.to_str().unwrap();
+        let save = || {
+            std::fs::write(
+                store.join(".resume/c1"),
+                store.join("img").to_str().unwrap(),
+            )
+            .unwrap()
+        };
+        let restores = || state.join("c1.restore").exists();
+
+        run(&["create", "--bundle", b, "c1"]);
+        save();
+        run(&["delete", "c1"]);
+        assert!(store.join(".resume/c1.gen").exists());
+        run(&["create", "--bundle", b, "c1"]);
+        assert!(restores(), "the same disk resumes the programs");
+
+        run(&["delete", "c1"]);
+        save();
+        run(&["delete", "c1"]);
+        std::fs::write(bundle.join("rootfs/etc/a"), "changed\n").unwrap();
+        run(&["create", "--bundle", b, "c1"]);
+        assert!(!restores(), "a changed disk starts cold");
+        let out = Command::new("sh")
+            .arg(&wrapper)
+            .args(["cua", "cold", "c1"])
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains("the disk changed after the save"));
+        let again = Command::new("sh")
+            .arg(&wrapper)
+            .args(["cua", "cold", "c1"])
+            .output()
+            .unwrap();
+        assert!(again.stdout.is_empty(), "the reason is read once");
+    }
     use super::*;
 
     #[test]

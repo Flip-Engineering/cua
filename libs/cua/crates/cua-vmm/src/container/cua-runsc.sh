@@ -21,12 +21,27 @@
 #                             inside the container, for CUDA programs' GPU state
 #   rm <dir>...               delete checkpoints
 #   forget <id>...            drop what is kept about deleted containers
+#   cold <id>                 print and clear why a suspended container last
+#                             started cold (its disk changed after the save)
 set -u
 RUNSC=@RUNSC@
 [ -x "$RUNSC" ] || RUNSC=/usr/bin/runsc
 STATE=@STATE@
 STORE=@STORE@
 VERSION=@VERSION@
+
+# The generation of a container's disk: a digest of every path's name, size,
+# time, mode and owner under its root (not /proc, /sys, /dev, /run, /tmp). A
+# suspended Space resumes with its programs only on the disk it was saved with.
+disk_gen() {
+    b=$1
+    r=$(sed -n 's/.*"root":{[^}]*"path":"\([^"]*\)".*/\1/p' "$b/config.json" 2>/dev/null | head -n 1)
+    [ -n "$r" ] || return 1
+    case "$r" in /*) ;; *) r="$b/$r" ;; esac
+    [ -d "$r" ] || return 1
+    (cd "$r" && find . -xdev \( -path ./proc -o -path ./sys -o -path ./dev -o -path ./run -o -path ./tmp \) -prune \
+        -o -printf '%p %s %T@ %m %U %G\n') | LC_ALL=C sort | sha256sum | cut -d' ' -f1
+}
 
 if [ "${1:-}" = cua ]; then
     shift
@@ -106,9 +121,18 @@ if [ "${1:-}" = cua ]; then
         printf '%s' "$dir" >"$STORE/.resume/$id"
         exit 0
         ;;
+    cold)
+        id="${1:?container id}"
+        case "$id" in */* | .*) echo "bad container id" >&2; exit 2 ;; esac
+        if [ -f "$STORE/.cold/$id" ]; then
+            cat "$STORE/.cold/$id"
+            rm -f "$STORE/.cold/$id"
+        fi
+        exit 0
+        ;;
     forget)
         for id in "$@"; do
-            case "$id" in */* | .*) ;; *) rm -f "$STORE/.restored/$id" "$STORE/.resume/$id" ;; esac
+            case "$id" in */* | .*) ;; *) rm -f "$STORE/.restored/$id" "$STORE/.resume/$id" "$STORE/.resume/$id.gen" "$STORE/.cold/$id" ;; esac
         done
         exit 0
         ;;
@@ -160,13 +184,25 @@ create)
     if [ -n "$id" ]; then
         mkdir -p "$STATE"
         [ -n "$root" ] && printf '%s' "$root" >"$STATE/$id.root"
+        printf '%s' "$bundle" >"$STATE/$id.bundle"
+        rm -f "$STORE/.cold/$id"
         img=$(sed -n 's/.*"ai\.cua\.restore":"\([^"]*\)".*/\1/p' "$bundle/config.json" 2>/dev/null | head -n 1)
         # A container suspended by `cua suspend` resumes: the same container,
         # the same identity, its programs as they were. The marker is used once,
         # so a restore that fails is followed by a cold start.
         if [ -f "$STORE/.resume/$id" ]; then
-            cat "$STORE/.resume/$id" >"$STATE/$id.restore"
-            rm -f "$STORE/.resume/$id"
+            saved=$(cat "$STORE/.resume/$id.gen" 2>/dev/null)
+            now=$(disk_gen "$bundle" 2>/dev/null)
+            if [ -n "$saved" ] && [ "$saved" = "$now" ]; then
+                cat "$STORE/.resume/$id" >"$STATE/$id.restore"
+            else
+                # The disk changed after the save (or its generation is unknown):
+                # the Space starts cold, and cua says its programs were not kept.
+                rm -f "$STATE/$id.restore"
+                mkdir -p "$STORE/.cold"
+                echo "the disk changed after the save" >"$STORE/.cold/$id"
+            fi
+            rm -f "$STORE/.resume/$id" "$STORE/.resume/$id.gen"
         # Only the first start restores: a container stopped and started
         # again boots (it has its own identity by then).
         elif [ -n "$img" ] && [ ! -e "$STORE/.restored/$id" ]; then
@@ -201,7 +237,15 @@ start)
     fi
     ;;
 delete)
-    [ -n "$id" ] && rm -f "$STATE/$id.root" "$STATE/$id.restore"
+    if [ -n "$id" ]; then
+        # Just suspended: the disk as the save left it, before the engine unmounts it.
+        if [ -f "$STORE/.resume/$id" ] && [ -f "$STATE/$id.bundle" ]; then
+            disk_gen "$(cat "$STATE/$id.bundle")" >"$STORE/.resume/$id.gen.partial" 2>/dev/null \
+                && mv -f "$STORE/.resume/$id.gen.partial" "$STORE/.resume/$id.gen"
+            rm -f "$STORE/.resume/$id.gen.partial"
+        fi
+        rm -f "$STATE/$id.root" "$STATE/$id.restore" "$STATE/$id.bundle"
+    fi
     ;;
 esac
 exec "$RUNSC" "$@"

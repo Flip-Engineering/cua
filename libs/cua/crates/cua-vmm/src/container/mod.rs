@@ -176,6 +176,19 @@ pub struct ContainerRuntime {
     snap: tokio::sync::OnceCell<snapshot::Support>,
 }
 
+/// What the last start of a Space has to say to its owner, by Space name: a
+/// Space saved with its programs that started cold says so here.
+static START_NOTES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+    std::sync::LazyLock::new(Default::default);
+
+/// Takes the note of Space `name`'s last start (`None` when it has none).
+pub fn take_start_note(name: &str) -> Option<String> {
+    START_NOTES
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(name)
+}
+
 /// The OOM score adjustment of a Space's container (higher dies first).
 pub const SPACE_OOM_SCORE_ADJ: i64 = 500;
 
@@ -1903,6 +1916,20 @@ impl Runtime for ContainerRuntime {
             }
             for sc in self.sidecar_names(name).await? {
                 let _ = self.docker.start_container(&sc, None).await;
+            }
+            if keeps_programs_when_running(&before)
+                && let Some(id) = before.id.as_deref()
+                && let Ok(Some(reason)) = self.helper().cold(id).await
+            {
+                // The disk changed after the save: the programs it held are gone.
+                let note = format!(
+                    "{name} started fresh because {reason}; the programs that were running in it were not kept"
+                );
+                tracing::warn!(name, %reason, "the Space started cold");
+                START_NOTES
+                    .lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .insert(name.to_string(), note);
             }
             if is_space(&before) {
                 self.follow_cards(name).await;
