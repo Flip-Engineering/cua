@@ -819,7 +819,7 @@ jobs:
           apt-get install -y --no-install-recommends ca-certificates curl git xz-utils gcc g++ make \
             binutils python3 python3-venv python3-yaml ninja-build pkg-config patchelf libglib2.0-dev \
             libpixman-1-dev libepoxy-dev libgbm-dev libdrm-dev libvulkan-dev libslirp-dev \
-            libseccomp-dev libcap-ng-dev zlib1g-dev flex bison
+            libseccomp-dev libcap-ng-dev zlib1g-dev flex bison bzip2
       - name: Build
         run: bash libs/flip-qemu/build.sh "$RUNNER_TEMP/flip-qemu" dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
