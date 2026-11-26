@@ -15,7 +15,7 @@
 #
 # The host GPU's own user-space stays the computer's: libgbm, libEGL, libGL,
 # libvulkan and libdrm are not shipped, because they belong to the host's
-# driver. Needs: a C compiler, python3 with venv, ninja, pkg-config, git,
+# driver. Needs: a C compiler, python3 with venv and PyYAML, ninja, pkg-config, git,
 # patchelf and the development files of glib, pixman, libepoxy, libgbm,
 # libdrm, vulkan (loader), libslirp, libseccomp, libcap-ng and zlib.
 set -euo pipefail
@@ -56,8 +56,9 @@ fetch_git "$src/virglrenderer" https://gitlab.freedesktop.org/virgl/virglrendere
 fetch_git "$src/vulkan-headers" https://github.com/KhronosGroup/Vulkan-Headers.git \
   "$VULKAN_HEADERS_TAG" "$VULKAN_HEADERS_COMMIT"
 
-# Meson from QEMU's own tarball, so both builds use one pinned version.
-python3 -m venv "$work/venv"
+# Meson from QEMU's own tarball, so both builds use one pinned version. The
+# venv sees the system's packages: virglrenderer's build needs PyYAML.
+python3 -m venv --system-site-packages "$work/venv"
 "$work/venv/bin/pip" install -q --no-index "$src/qemu-$QEMU_VERSION"/python/wheels/meson-*.whl
 export PATH="$work/venv/bin:$PATH"
 # Venus needs Vulkan headers newer than some distributions ship; the loader
