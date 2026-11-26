@@ -62,6 +62,80 @@ pub fn card_minors<'a>(names: impl Iterator<Item = &'a str>) -> BTreeSet<u32> {
         .collect()
 }
 
+/// Whether a kernel device event (a uevent from the kernel's netlink group)
+/// can change the host's NVIDIA cards: a PCI device bound to the NVIDIA
+/// driver, or a PCI device unbound or removed (the kernel sends no driver name
+/// on unbind, so every PCI unbind and remove counts; the reconcile that
+/// follows reads the cards as they are and does nothing when none changed).
+pub fn affects_cards(msg: &[u8]) -> bool {
+    let mut action = None;
+    let mut subsystem = None;
+    let mut driver = None;
+    for field in msg.split(|b| *b == 0) {
+        let field = std::str::from_utf8(field).unwrap_or("");
+        if let Some(v) = field.strip_prefix("ACTION=") {
+            action = Some(v);
+        } else if let Some(v) = field.strip_prefix("SUBSYSTEM=") {
+            subsystem = Some(v);
+        } else if let Some(v) = field.strip_prefix("DRIVER=") {
+            driver = Some(v);
+        }
+    }
+    subsystem == Some("pci")
+        && match action {
+            Some("bind") => driver == Some("nvidia"),
+            Some("unbind") | Some("remove") => true,
+            _ => false,
+        }
+}
+
+/// Calls `on_change` for every kernel device event that can change the host's
+/// NVIDIA cards, until the socket fails. It reads the kernel's own uevent
+/// group, which needs no privilege; it never opens a card.
+#[cfg(target_os = "linux")]
+pub fn watch_kernel(mut on_change: impl FnMut()) -> std::io::Result<()> {
+    // SAFETY: plain socket calls with checked results; the buffer outlives recv.
+    unsafe {
+        let fd = libc::socket(
+            libc::AF_NETLINK,
+            libc::SOCK_DGRAM | libc::SOCK_CLOEXEC,
+            libc::NETLINK_KOBJECT_UEVENT,
+        );
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        let mut addr: libc::sockaddr_nl = std::mem::zeroed();
+        addr.nl_family = libc::AF_NETLINK as u16;
+        // Group 1: the kernel's events (group 2 is udev's re-broadcast).
+        addr.nl_groups = 1;
+        if libc::bind(
+            fd,
+            &addr as *const libc::sockaddr_nl as *const libc::sockaddr,
+            std::mem::size_of::<libc::sockaddr_nl>() as u32,
+        ) < 0
+        {
+            let e = std::io::Error::last_os_error();
+            libc::close(fd);
+            return Err(e);
+        }
+        let mut buf = vec![0u8; 64 * 1024];
+        loop {
+            let n = libc::recv(fd, buf.as_mut_ptr() as *mut libc::c_void, buf.len(), 0);
+            if n < 0 {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                libc::close(fd);
+                return Err(e);
+            }
+            if affects_cards(&buf[..n as usize]) {
+                on_change();
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -135,6 +209,39 @@ mod tests {
             space: vec![0],
         });
         assert_eq!(steps, vec![NodeStep::RefreshSpace]);
+    }
+
+    fn uevent(fields: &[&str]) -> Vec<u8> {
+        let mut msg = b"bind@/devices/pci0000:00/0000:41:00.0".to_vec();
+        for f in fields {
+            msg.push(0);
+            msg.extend_from_slice(f.as_bytes());
+        }
+        msg
+    }
+
+    #[test]
+    fn a_card_bound_to_nvidia_or_any_pci_unbind_or_remove_counts() {
+        assert!(affects_cards(&uevent(&[
+            "ACTION=bind",
+            "SUBSYSTEM=pci",
+            "DRIVER=nvidia"
+        ])));
+        assert!(affects_cards(&uevent(&["ACTION=unbind", "SUBSYSTEM=pci"])));
+        assert!(affects_cards(&uevent(&["ACTION=remove", "SUBSYSTEM=pci"])));
+        // Another driver, another subsystem, or an action that changes no binding: no.
+        assert!(!affects_cards(&uevent(&[
+            "ACTION=bind",
+            "SUBSYSTEM=pci",
+            "DRIVER=amdgpu"
+        ])));
+        assert!(!affects_cards(&uevent(&["ACTION=add", "SUBSYSTEM=usb"])));
+        assert!(!affects_cards(&uevent(&[
+            "ACTION=change",
+            "SUBSYSTEM=pci",
+            "DRIVER=nvidia"
+        ])));
+        assert!(!affects_cards(b"garbage"));
     }
 
     #[test]
