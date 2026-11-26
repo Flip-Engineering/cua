@@ -429,6 +429,46 @@ impl ContainerRuntime {
         }
     }
 
+    /// Copies NVIDIA's cuda-checkpoint from the host (`CUA_CUDA_CHECKPOINT_HOST`) into
+    /// the running Space at `path` when the Space lacks it. A copy, not a bind: a
+    /// Space made before the owner's acceptance gets it at its next save too. The
+    /// file goes in under a temporary name and is renamed, so a half copy never runs.
+    async fn offer_cuda_checkpoint(&self, name: &str, path: &str) {
+        let Ok(host) = std::env::var(CUDA_CHECKPOINT_HOST_ENV) else {
+            return;
+        };
+        let Ok(binary) = tokio::fs::read(&host).await else {
+            return;
+        };
+        if self
+            .guest_ok(name, &format!("test -x {}", sh_quote(path)))
+            .await
+        {
+            return;
+        }
+        let (dest, part) = (sh_quote(path), sh_quote(&format!("{path}.part")));
+        let script = format!(
+            "set -e; mkdir -p \"$(dirname {dest})\"; cat > {part}; chmod 0755 {part}; mv -f {part} {dest}"
+        );
+        let req = crate::exec::ExecRequest {
+            user: Some("0".into()),
+            ..crate::exec::ExecRequest::sh(script)
+                .stdin(binary)
+                .timeout(std::time::Duration::from_secs(120))
+        };
+        match crate::exec::GuestExec::exec(&self.exec_handle(name), req).await {
+            Ok(out) if out.exit_code == 0 => {}
+            Ok(out) => tracing::warn!(
+                name,
+                code = out.exit_code,
+                "cuda-checkpoint could not be copied into the Space"
+            ),
+            Err(e) => {
+                tracing::warn!(name, error = %e, "cuda-checkpoint could not be copied into the Space")
+            }
+        }
+    }
+
     /// Whether `script` exits 0 in the Space, run as root (false when it cannot run).
     async fn guest_ok(&self, name: &str, script: &str) -> bool {
         let req = crate::exec::ExecRequest {
@@ -465,6 +505,7 @@ impl ContainerRuntime {
             std::env::var(CUDA_CHECKPOINT_ENV).unwrap_or_else(|_| CUDA_CHECKPOINT_PATH.into())
         });
         if let Some(path) = cuda.clone() {
+            self.offer_cuda_checkpoint(name, &path).await;
             // Without NVIDIA's cuda-checkpoint in the Space, a save would drop the GPU
             // state of a program that holds a card and restore it broken: then the
             // Space takes the cold path. With no program on a card, it saves without
@@ -3469,6 +3510,10 @@ fn sh_quote(s: &str) -> String {
 const CUDA_CHECKPOINT_PATH: &str = "/usr/local/bin/cuda-checkpoint";
 /// Names cuda-checkpoint's path inside a Space.
 const CUDA_CHECKPOINT_ENV: &str = "CUA_CUDA_CHECKPOINT";
+/// Names the host file of NVIDIA's cuda-checkpoint that the VM service installs
+/// after the owner accepts NVIDIA's licence; without that acceptance it is unset
+/// or names no file.
+const CUDA_CHECKPOINT_HOST_ENV: &str = "CUA_CUDA_CHECKPOINT_HOST";
 
 /// Rewrites the Space's CDI class from a plan's served cards, when the VM
 /// service keeps one. A failure is logged: the engine then reads the class as
