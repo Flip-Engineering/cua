@@ -176,13 +176,21 @@ pub struct ContainerRuntime {
     snap: tokio::sync::OnceCell<snapshot::Support>,
 }
 
-/// What the last start of a Space has to say to its owner, by Space name: a
-/// Space saved with its programs that started cold says so here.
-static START_NOTES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, String>>> =
+/// A Space saved with its programs that started fresh instead.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreshStart {
+    /// Why, in plain words ("the disk changed after the save").
+    pub reason: String,
+    /// When it started, in seconds since the Unix epoch.
+    pub at_unix: i64,
+}
+
+/// Fresh starts not yet told, by Space name.
+static START_NOTES: std::sync::LazyLock<std::sync::Mutex<HashMap<String, FreshStart>>> =
     std::sync::LazyLock::new(Default::default);
 
-/// Takes the note of Space `name`'s last start (`None` when it has none).
-pub fn take_start_note(name: &str) -> Option<String> {
+/// Takes Space `name`'s fresh start, once (`None` when it resumed or was not saved).
+pub fn take_start_note(name: &str) -> Option<FreshStart> {
     START_NOTES
         .lock()
         .unwrap_or_else(|p| p.into_inner())
@@ -1891,6 +1899,12 @@ impl Runtime for ContainerRuntime {
             .await?
             .ok_or_else(|| VmmError::NotFound(name.into()))?;
         if Self::status_from(&before) == Status::Stopped {
+            // A host that requires gVisor starts nothing made under runc.
+            if self.cfg.require_gvisor && matches!(Self::isolation_from(&before), Isolation::Runc) {
+                return Err(VmmError::invalid(format!(
+                    "{name} runs under runc, and this host runs Spaces only under gVisor"
+                )));
+            }
             // A personal Space starts with the machine's cards of now.
             if keeps_programs_when_running(&before) || is_space(&before) {
                 write_class(&crate::accel::plan(&self.machine_facts().await));
@@ -1922,14 +1936,15 @@ impl Runtime for ContainerRuntime {
                 && let Ok(Some(reason)) = self.helper().cold(id).await
             {
                 // The disk changed after the save: the programs it held are gone.
-                let note = format!(
-                    "{name} started fresh because {reason}; the programs that were running in it were not kept"
-                );
-                tracing::warn!(name, %reason, "the Space started cold");
+                tracing::warn!(name, %reason, "the Space started fresh; its programs were not kept");
+                let at_unix = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs() as i64)
+                    .unwrap_or_default();
                 START_NOTES
                     .lock()
                     .unwrap_or_else(|p| p.into_inner())
-                    .insert(name.to_string(), note);
+                    .insert(name.to_string(), FreshStart { reason, at_unix });
             }
             if is_space(&before) {
                 self.follow_cards(name).await;
@@ -2735,6 +2750,7 @@ impl ContainerRuntime {
     /// [`choose_group_runtime`]); nothing silently falls back to runc.
     async fn group_runtime(&self, spec: &StartSpec) -> Result<String> {
         let explicit = spec.container_runtime.as_deref();
+        refuse_runc_when_required(self.cfg.require_gvisor, explicit)?;
         let resolved = if explicit == Some("runc") {
             "runc".to_string()
         } else {
@@ -3699,6 +3715,17 @@ pub fn normalize_container_runtime(name: &str) -> Option<&'static str> {
     }
 }
 
+/// Refuses an explicit `runc` on a host that requires gVisor
+/// ([`REQUIRE_GVISOR_ENV`]): there every Space runs under gVisor.
+fn refuse_runc_when_required(require_gvisor: bool, explicit: Option<&str>) -> Result<()> {
+    if require_gvisor && explicit.and_then(normalize_container_runtime) == Some("runc") {
+        return Err(VmmError::invalid(
+            "this host runs Spaces only under gVisor; runtime runc is refused",
+        ));
+    }
+    Ok(())
+}
+
 /// The group's OCI runtime. `explicit` is the user's choice (`runc` /
 /// `runsc`), `resolved` what the engine would pick (`runsc` when gVisor is
 /// available). runc only when chosen explicitly or when gVisor is not
@@ -3846,6 +3873,15 @@ fn pull_fraction(download: Option<f64>, extract: Option<f64>) -> Option<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_host_that_requires_gvisor_refuses_an_explicit_runc() {
+        assert!(refuse_runc_when_required(true, Some("runc")).is_err());
+        assert!(refuse_runc_when_required(true, Some(" RUNC ")).is_err());
+        assert!(refuse_runc_when_required(true, Some("gvisor")).is_ok());
+        assert!(refuse_runc_when_required(true, None).is_ok());
+        assert!(refuse_runc_when_required(false, Some("runc")).is_ok());
+    }
 
     #[test]
     fn pool_hosts_can_require_gvisor_by_environment() {
