@@ -263,6 +263,23 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: aarch64-apple-darwin, x86_64-apple-darwin
+      # The Opus codec inside cua-spacesd builds with CMake, which the lab guest
+      # does not carry. Kitware's build lives in this job's temp folder only and is
+      # checked by digest. CMake 3: the bundled Opus declares a minimum below 3.5,
+      # which CMake 4 refuses.
+      - name: CMake for this job
+        env:
+          CMAKE_VERSION: "3.31.12"
+          CMAKE_SHA256: "799af7fd545db9bf1b9cfe72f8095880e727a2d4e0df0e3dffc3bc7b95c2d3b0"
+        run: |
+          set -euo pipefail
+          if command -v cmake >/dev/null; then cmake --version | head -n 1; exit 0; fi
+          name="cmake-$CMAKE_VERSION-macos-universal"
+          curl --proto '=https' -fsSL -o "$RUNNER_TEMP/$name.tar.gz" \
+            "https://github.com/Kitware/CMake/releases/download/v$CMAKE_VERSION/$name.tar.gz"
+          echo "$CMAKE_SHA256  $RUNNER_TEMP/$name.tar.gz" | shasum -a 256 -c -
+          tar -xzf "$RUNNER_TEMP/$name.tar.gz" -C "$RUNNER_TEMP"
+          echo "$RUNNER_TEMP/$name/CMake.app/Contents/bin" >> "$GITHUB_PATH"
       - name: Build x86_64 and cross-compile arm64 using the macOS SDK
         working-directory: libs/cua-spacesd
         run: |
