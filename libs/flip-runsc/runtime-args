@@ -1,0 +1,7 @@
+# The arguments of every engine entry that runs Flip's runsc (runsc and
+# cua-runsc). Flip's updater registers exactly these from the runsc tarball, and
+# the release's overlay proof runs with them.
+--allow-suid
+# Root filesystem writes go to the engine's layer and stay across a stop.
+--overlay2=none
+--nvproxy-allowed-driver-capabilities=compute,utility,graphics,video

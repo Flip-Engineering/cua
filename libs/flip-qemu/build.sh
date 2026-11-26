@@ -82,22 +82,25 @@ mkdir -p "$work/qemu-build"
 make -C "$work/qemu-build" -j"$(( ($(nproc) + 1) / 2 ))"
 make -C "$work/qemu-build" install
 
-mkdir -p "$stage/bin" "$stage/lib" "$stage/share"
+mkdir -p "$stage/bin" "$stage/lib" "$stage/libexec" "$stage/share"
 cp "$prefix/bin/$emulator" "$prefix/bin/qemu-img" "$stage/bin/"
+# Venus runs each guest context in virglrenderer's render server, a program of
+# its own; the service finds it through RENDER_SERVER_EXEC_PATH.
+cp "$prefix/libexec/virgl_render_server" "$stage/libexec/"
 cp -r "$prefix/share/qemu" "$stage/share/"
 # The libraries to ship: everything the binaries load except glibc and the host
 # driver's user-space.
 host_owned='^(linux-vdso|ld-linux|libc|libm|libpthread|libdl|librt|libresolv|libgbm|libEGL|libGL|libGLX|libGLdispatch|libOpenGL|libvulkan|libdrm)[.-]'
-for b in "$stage/bin/"*; do LD_LIBRARY_PATH="$prefix/lib" ldd "$b"; done | awk '$2 == "=>" && $3 ~ /^\// { print $1, $3 }' | sort -u |
+for b in "$stage/bin/"* "$stage/libexec/"*; do LD_LIBRARY_PATH="$prefix/lib" ldd "$b"; done | awk '$2 == "=>" && $3 ~ /^\// { print $1, $3 }' | sort -u |
   while read -r name path; do
     if ! printf '%s\n' "$name" | grep -Eq "$host_owned"; then cp -L "$path" "$stage/lib/$name"; fi
   done
 # Every binary and library finds the shipped libraries next to it.
 # shellcheck disable=SC2016
-for f in "$stage/bin/"* "$stage/lib/"*; do patchelf --set-rpath '$ORIGIN/../lib' "$f"; done
+for f in "$stage/bin/"* "$stage/libexec/"* "$stage/lib/"*; do patchelf --set-rpath '$ORIGIN/../lib' "$f"; done
 
 # The oldest glibc any shipped file needs; the updater compares it with the computer's.
-glibc_min="$(for f in "$stage/bin/"* "$stage/lib/"*; do objdump -T "$f"; done |
+glibc_min="$(for f in "$stage/bin/"* "$stage/libexec/"* "$stage/lib/"*; do objdump -T "$f"; done |
   grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -t. -k2,2n -u | tail -n 1 | sed 's/GLIBC_//')"
 "$stage/bin/$emulator" -device help | grep -q '"virtio-gpu-gl-pci"' ||
   { echo "the build has no virtio-gpu-gl-pci" >&2; exit 1; }
@@ -108,6 +111,7 @@ label=$label
 qemu=$QEMU_VERSION
 virglrenderer=$VIRGLRENDERER_VERSION
 venus=true
+render_server=libexec/virgl_render_server
 emulator=$emulator
 glibc_min=$glibc_min
 EOF

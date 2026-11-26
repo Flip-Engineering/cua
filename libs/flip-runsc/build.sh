@@ -8,7 +8,7 @@
 # that keeps its contents (never /tmp). The out dir gets
 # flip-runsc-<label>-<x86_64|aarch64>.tar.gz with the layout of gVisor's own release
 # tarball (runsc, containerd-shim-runsc-v1, gvisor-bin/) plus DRIVERS.json,
-# UNTESTED.txt, BULLETINS.txt and LICENSE. Needs git, go, python3 and a C
+# UNTESTED.txt, BULLETINS.txt, RUNTIME_ARGS and LICENSE. Needs git, go, python3 and a C
 # compiler for the target ($CC, default gcc for amd64 and aarch64-linux-gnu-gcc
 # for arm64).
 set -euo pipefail
@@ -48,6 +48,13 @@ if [ "$gomod" != "$GO_VERSION" ] || [ "$gover" != "go$GO_VERSION" ]; then
   exit 1
 fi
 
+# Changes to gVisor's own files are patches under patches/, applied in name
+# order to the pinned commit; each must apply cleanly or the build stops.
+for p in "$here"/patches/*.patch; do
+  [ -e "$p" ] || continue
+  git -C "$src" apply --check "$p"
+  git -C "$src" apply "$p"
+done
 nv="$src/pkg/sentry/devices/nvproxy"
 cp "$here"/version_flip*.go "$nv/"
 python3 "$here/driver_table.py" go --drivers "$here/drivers.json" --out "$nv/version_flip_drivers.go"
@@ -87,6 +94,8 @@ small="-Os -ffreestanding -fno-sanitize=all -fno-stack-protector -fno-asynchrono
 # shellcheck disable=SC2086
 "$cc" $small -no-pie -o "$stage/gvisor-bin/gvisor-sentry-prewarmer" "$src/runsc/prewarmer/prewarmer.c"
 cp "$src/LICENSE" "$stage/LICENSE"
+# The engine arguments Flip's updater registers, without comments.
+grep -v '^#' "$here/runtime-args" | sed '/^$/d' >"$stage/RUNTIME_ARGS"
 # The release job refreshes NVIDIA's bulletins into FLIP_RUNSC_BULLETINS; a local
 # build uses the copy in this directory.
 bulletins="${FLIP_RUNSC_BULLETINS:-$here/bulletins.json}"

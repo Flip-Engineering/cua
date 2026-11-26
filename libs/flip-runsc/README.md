@@ -33,5 +33,15 @@ tarball carries them as DRIVERS.json `bulletins` and BULLETINS.txt. Flip's updat
 computer's driver with them and reports the fixed version of its branch; Flip tells the owner
 once. Nothing installs a driver.
 
+How changes reach gVisor: new Go files beside the table (`version_flip*.go`) are copied into
+`pkg/sentry/devices/nvproxy`; changes to gVisor's own files are patches in `patches/`
+(`NNNN-name.patch`, made with `git diff` against `GVISOR_GO_COMMIT`), applied in name order;
+each must apply cleanly or the build stops.
+
+`runtime-args` holds the arguments of every engine entry that runs this runsc. The tarball
+carries them as RUNTIME_ARGS; Flip's updater registers exactly these, and `overlay-proof.sh`
+(release job `runsc-overlay-proof`) proves with them that a container keeps its root writes
+across a stop and a start, and that gVisor's default drops them.
+
 `build.sh <amd64|arm64> <work dir> <out dir>` builds `flip-runsc-<label>-<arch>.tar.gz`; the
 `runsc-linux` job of `cd-cua-spacesd.yml` runs it for each release.

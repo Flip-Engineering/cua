@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # Proves that a Space under Flip's runsc keeps its root filesystem writes across
-# a stop and a start, with the runtime arguments Flip's updater registers
-# (--overlay2=none), and shows that gVisor's default (no such flag) drops them.
+# a stop and a start, with the runtime arguments Flip's updater registers: the
+# tarball's RUNTIME_ARGS, the same file the updater reads. It fails when
+# --overlay2=none is taken out of that file, and it also fails unless gVisor's
+# default (no such flag) drops the write, so the test tells the two apart.
 #
 #   overlay-proof.sh <dir with runsc> <work dir>
 #
@@ -19,10 +21,11 @@ sock="unix://$work/docker.sock"
 image="${PROOF_IMAGE:-debian:12-slim}"
 proof=/root/flip-overlay-proof
 
+args=$(sed 's/.*/"&"/' "$runsc_dir/RUNTIME_ARGS" | paste -sd, -)
 cat >"$work/daemon.json" <<JSON
 {
   "runtimes": {
-    "flip": {"path": "$runsc_dir/runsc", "runtimeArgs": ["--allow-suid", "--overlay2=none"]},
+    "flip": {"path": "$runsc_dir/runsc", "runtimeArgs": [$args]},
     "gvisor-default": {"path": "$runsc_dir/runsc", "runtimeArgs": ["--allow-suid"]}
   }
 }
@@ -52,6 +55,6 @@ check() { # runtime -> prints "<kept after restart> <in export>"
 read -r flip_kept flip_exported < <(check flip)
 read -r def_kept def_exported < <(check gvisor-default)
 echo "runsc $("$runsc_dir/runsc" --version | head -n 1)"
-echo "flip (--overlay2=none): kept after stop and start: $flip_kept; in docker export: $flip_exported"
+echo "flip ($(paste -sd' ' "$runsc_dir/RUNTIME_ARGS")): kept after stop and start: $flip_kept; in docker export: $flip_exported"
 echo "gVisor's default overlay (control): kept after stop and start: $def_kept; in docker export: $def_exported"
-[ "$flip_kept" = yes ] && [ "$flip_exported" = yes ]
+[ "$flip_kept" = yes ] && [ "$flip_exported" = yes ] && [ "$def_kept" = no ]
