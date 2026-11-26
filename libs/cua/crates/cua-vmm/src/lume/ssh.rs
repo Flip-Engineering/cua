@@ -54,8 +54,9 @@ impl LumeSshExec {
             inner.push_str(&format!("export {}={}; ", k, shell_quote(v)));
         }
         inner.push_str(&req.script);
+        // A template ending in X: BSD mktemp (the macOS guest) and GNU mktemp both take it.
         let wrapper = format!(
-            "e=$(mktemp -t cua-exec) || exit 125; \
+            "e=$(mktemp \"${{TMPDIR:-/tmp}}/cua-exec.XXXXXX\") || exit 125; \
              ( /bin/sh -c {inner} ) 2>\"$e\"; rc=$?; \
              printf '\\036{marker}\\036%d\\036' \"$rc\"; \
              base64 < \"$e\"; rm -f \"$e\"; exit \"$rc\"",
@@ -286,8 +287,7 @@ mod tests {
         .unwrap();
         #[cfg(unix)]
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+            crate::testutil::seal_exec(&p, 0o755);
         }
         p.display().to_string()
     }
