@@ -2407,10 +2407,18 @@ mod tests {
             "#!/bin/sh\necho 'welcome to your shell'\nANTHROPIC_API_KEY=sk-ant-from-shell-0000-wxyz; export ANTHROPIC_API_KEY\nshift 3\nexec /bin/sh -c \"$1\"\n",
         )
         .unwrap();
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        }
+        // Made executable as a new file by a child process: a fork in another test thread
+        // while this file was open for writing would make its exec fail (Text file busy).
+        let sealed = std::process::Command::new("/bin/sh")
+            .args([
+                "-c",
+                "cp \"$1\" \"$1.x\" && chmod 755 \"$1.x\" && mv -f \"$1.x\" \"$1\"",
+                "seal",
+            ])
+            .arg(&shell)
+            .status()
+            .unwrap();
+        assert!(sealed.success());
         let names = app_call(&keys, "agent_keys.shell", serde_json::json!({}), &shell)
             .unwrap()
             .unwrap();

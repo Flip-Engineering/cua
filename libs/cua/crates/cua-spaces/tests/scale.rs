@@ -387,7 +387,28 @@ fn check(name: &str, run: &Run, expect_listed: usize) {
     );
 }
 
+/// The scale tests run side by side and each holds hundreds of sockets, more than a
+/// shell's usual soft limit of 1024 open files. The process takes its hard limit, the
+/// most the system lets it have, so the result does not depend on the shell's soft limit.
+fn open_file_limit_raised() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        #[cfg(unix)]
+        unsafe {
+            let mut r = libc::rlimit {
+                rlim_cur: 0,
+                rlim_max: 0,
+            };
+            if libc::getrlimit(libc::RLIMIT_NOFILE, &mut r) == 0 && r.rlim_cur < r.rlim_max {
+                r.rlim_cur = r.rlim_max;
+                libc::setrlimit(libc::RLIMIT_NOFILE, &r);
+            }
+        }
+    });
+}
+
 async fn world() -> (World, usize) {
+    open_file_limit_raised();
     let hosts = size("CUA_SCALE_HOSTS", 20);
     let per = size("CUA_SCALE_SPACES", 10);
     let w = World::new(hosts, per).await;
